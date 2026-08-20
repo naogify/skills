@@ -24,7 +24,20 @@ WDIR="$MISSION/workers/$NO"
 
 if [ "$FORCE" != "--force" ]; then
   if [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
-    hold "REPORT.md も PLAN.md も無い（まだ終わっていない）: $WDIR"
+    # 報告が無くても、担当 PR が既にマージ / クローズされていれば完了と見なす
+    # （司令官が部下を飛ばしてマージした場合、REPORT は書かれない）。
+    prnum=$(printf '%s' "$NO" | sed 's/^f//')
+    prstate=""
+    case "$prnum" in
+      ''|*[!0-9]*) : ;;
+      *) slug=$(git -C "${repo:-.}" remote get-url origin 2>/dev/null \
+            | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+         [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
+    esac
+    case "$prstate" in
+      MERGED|CLOSED) printf '報告は無いが PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
+      *) hold "REPORT.md も PLAN.md も無く、PR も未マージ（まだ終わっていない）: $WDIR" ;;
+    esac
   fi
   [ -s "$WDIR/QUESTION.md" ] && hold "QUESTION.md が残っている（未回答）: $WDIR/QUESTION.md"
   [ -s "$WDIR/BLOCKED.md" ]  && hold "BLOCKED.md が残っている（人間の判断待ち）: $WDIR/BLOCKED.md"
@@ -115,7 +128,17 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$WDIR/RETIRED"
 
 # 完了台帳に追記する。inbox.sh がこれと reported.log を比べて
 # 「人間に未報告の完了」を毎回突き付けるので、報告漏れが構造的に起きない。
-printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NO" "$name" >> "$MISSION/completed.log"
+# 成果物のダイジェストを作る。報告に必要な材料を台帳に焼き込む
+digest=""
+for f in REPORT PLAN POSTED; do
+  [ -s "$WDIR/$f.md" ] || continue
+  concl=$(LC_ALL=C grep -a -A3 '^## 結論' "$WDIR/$f.md" 2>/dev/null | sed -n '2p' | cut -c1-100)
+  [ -n "$concl" ] && digest="${digest}${concl} "
+done
+refs=$(LC_ALL=C grep -aohE '#[0-9]{2,5}' "$WDIR"/*.md 2>/dev/null | sort -u | tr '\n' ' ')
+[ -n "$refs" ] && digest="${digest}[参照: ${refs}]"
+digest=$(printf '%s' "$digest" | tr '\t\n' '  ')
+printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$NO" "$name" "${digest:-（成果物のダイジェストなし）}" >> "$MISSION/completed.log"
 
 # ── 解放できた資源を実測して出す ──
 after_swap=$(sysctl -n vm.swapusage 2>/dev/null | sed -n 's/.*used = \([0-9.]*\)M.*/\1/p')

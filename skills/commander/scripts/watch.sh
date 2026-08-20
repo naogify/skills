@@ -32,9 +32,34 @@ while :; do
   # まず --peek で有無だけ見る。あったら「消化して」中身を出す。
   # --peek のまま終わると、司令官が処理しても消化されないので同じ報告で即再発火する
   # （実際に無限に発火した）。中身はこの出力で司令官に届くので、消化して問題ない。
-  if [ -n "$(bash "$INBOX" "$MISSION" --peek 2>/dev/null)" ]; then
+  # 判定からは台帳の催促を除く（未報告が残っている間ずっと即発火してしまい、
+  # 本来の「部下の動きを待つ」機能が死ぬ）。本文を出すときは台帳も含める。
+  if [ -n "$(bash "$INBOX" "$MISSION" --peek --no-ledger 2>/dev/null)" ]; then
     printf 'watch: 新しい動きを検知（稼働 %s 人）。以下を処理すること\n' "$active"
     bash "$INBOX" "$MISSION" 2>/dev/null | head -60
+    exit 0
+  fi
+
+  # 「待ち」で止まった部下の検知。
+  # 部下は「CI を待つ」と判断してターンを終えることがある。誰も起こさないので永久に止まる。
+  # todo が進まないまま一定時間が経ったら、司令官が代わりに外側（CI / PR の状態）を確認して押す。
+  waiting=""
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    no=$(printf '%s' "$row" | jq -r '.no'); ref=$(printf '%s' "$row" | jq -r '.ws_ref')
+    [ -f "$MISSION/workers/$no/RETIRED" ] && continue
+    [ -s "$MISSION/workers/$no/REPORT.md" ] && continue
+    scr=$(cmux read-screen --workspace "$ref" --lines 12 2>/dev/null)
+    case "$scr" in
+      *"esc to interrupt"*) : ;;                      # 稼働中
+      *) case "$scr" in
+           *[Ww]ait*|*待*) waiting="${waiting}${no} " ;;  # 「待つ」と言って turn を終えている
+         esac ;;
+    esac
+  done < "$ROSTER"
+  if [ -n "$waiting" ]; then
+    printf 'watch: 「待ち」でターンを終えて止まっている部下: %s\n' "$waiting"
+    printf 'watch: 司令官が gh pr checks で外側の状態を確認し、済んでいれば cmux send で押すこと\n'
     exit 0
   fi
 

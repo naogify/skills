@@ -84,6 +84,23 @@ else
   ok 'SKILL.md は $SKILL 相対で書かれている'
 fi
 
+# 6d) 部下テンプレに「CI を待つ」を仕事として書いていないか
+#     部下は待てない（ターンが終わると誰も起こさない）。実例: CI 緑・approve 済みで 42 分停止。
+if LC_ALL=C grep -aq 'gh pr checks' "$D/../templates/worker-prompt.md" 2>/dev/null \
+   && LC_ALL=C grep -aq -- '--watch' "$D/../templates/worker-prompt.md" 2>/dev/null; then
+  ok '部下テンプレはブロックするコマンド（gh pr checks --watch）で待つよう指示している'
+else
+  bad '部下テンプレに CI をブロックして待つ方法が書かれていない（「後で確認」で永久停止する）'
+fi
+
+# 6e) 責務分離: マージは部下の仕事として書かれているか
+if LC_ALL=C grep -aq 'マージも「あなたの仕事」' "$D/../templates/worker-prompt.md" 2>/dev/null \
+   && LC_ALL=C grep -aq 'マージは部下にやらせる' "$D/../SKILL.md" 2>/dev/null; then
+  ok 'マージは部下の仕事として定義されている（司令官は検収と GO のみ）'
+else
+  bad '司令官がマージする設計に戻っている（部下の報告と撤収の引き金が消える）'
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"

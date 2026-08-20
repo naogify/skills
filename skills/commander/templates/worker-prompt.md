@@ -131,8 +131,51 @@ cmux workspace status set review            # サイドバーのレーンが「�
 **commit までやって push はしない。** REPORT.md を書いたら**その場で待機**し、
 司令官から「push して PR を作れ」の指示が来てから進む。
 PR を作ったら PR 番号と URL を `<MISSION>/workers/<no>/PR.md` に書き、
-approve が出るまでレビュー対応を自走する。approve と CI 全緑が揃ったら
-`REPORT.md` を更新して再度 `REPORT` を打ち、マージ指示を待つ。
+### CI とレビューの完了を待つのは**あなたの仕事**
+
+push したら、**ブロックするコマンドで待つ**:
+
+```bash
+gh pr checks <n> --repo <owner/repo> --watch --interval 30
+# CI が全部終わるまでブロックする。タイムアウトで切れたら「もう一度同じコマンドを呼ぶ」
+```
+
+**「10分後に確認しよう」と考えてターンを終えてはならない。** それをやると誰もあなたを起こさず、
+待っているつもりで**永久に止まる**（実例: CI 全緑・approve 済みの状態で 42 分放置された）。
+待つときは**必ずブロックするコマンドを呼ぶ**。ツールがタイムアウトしたら**呼び直す**。
+ツールを呼び続けている限りあなたのターンは続く。**自分の判断でターンを終えるのは「報告を書いたとき」だけ。**
+
+CodeRabbit のレビューも `gh pr checks` の一項目として出る（`CodeRabbit ... Review completed`）ので、
+同じ `--watch` で待てる。レビュー結果は次で取る:
+
+```bash
+gh pr view <n> --repo <owner/repo> --json reviewDecision,mergeStateStatus
+gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:50){nodes{isResolved comments(first:1){nodes{author{login} path line body}}}}}}}' -F o=<owner> -F r=<repo> -F n=<n>
+```
+
+- CI が赤い → 原因を切り分ける。**本 PR 起因なら直す**。無関係（uuid のロックファイル等）なら直さず報告に明記
+- CodeRabbit の指摘 → **スコープ内なら直す**。スコープ外・設計判断なら別 issue に切って返信する
+- 直したら push して**また `--watch` で待つ**。これを **CI 全緑かつ未解決スレッド 0 になるまで繰り返す**
+
+**そこまで到達してから `REPORT.md` を書いて止まる。** 司令官が待っているのは
+「CI が緑になったか」ではなく**あなたの報告**である。
+
+### マージも「あなたの仕事」（ただし指示が来たときだけ）
+
+司令官が検収（CI 全緑 / 最新 head への approve / 未解決スレッド 0）を済ませると、
+「マージしろ」という指示が来る。**そのときは自分でマージする**:
+
+```bash
+gh pr merge <n> --repo <owner/repo> --merge --delete-branch   # squash は使わない
+# approve が無くて BLOCKED になる場合のみ --admin を足す（司令官の指示に従う）
+gh pr view <n> --repo <owner/repo> --json state,mergedAt,mergeCommit   # 実際にマージされたか確認
+```
+
+マージできたら **`REPORT.md` にマージコミットの SHA を追記して止まる**。
+これが司令官の撤収の引き金になる。**追記を忘れると、あなたのワークスペースが片付かない。**
+
+**指示が来ていないのにマージしてはならない。** 検収前のマージは、穴が開いたままの変更を
+本流に入れることになる。
 
 ## 4. 自力で進めないとき
 

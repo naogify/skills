@@ -16,7 +16,7 @@ export CMUX_QUIET=1
 
 die() { printf '%s\n' "inbox: $*" >&2; exit 1; }
 [ $# -ge 1 ] || die "usage: inbox.sh <mission-dir> [--peek]"
-MISSION=$1; PEEK=${2:-}
+MISSION=$1; PEEK=${2:-}; LEDGER=${3:-}
 [ -d "$MISSION" ] || die "mission ディレクトリが無い: $MISSION"
 ROSTER="$MISSION/roster.jsonl"
 [ -s "$ROSTER" ] || die "部下がいない: $ROSTER"
@@ -34,17 +34,38 @@ put_state() { printf '%s\t%s\n' "$1" "$2" >> "$NEW_STATE"; }
 NOTES=$(cmux list-notifications --json 2>/dev/null) || NOTES='[]'
 out=""
 
+# 担当 PR が既にマージ / クローズされているのに撤収されていない部下を突き付ける。
+# 司令官がマージした後に撤収を忘れ、ワークスペースと worktree が残り続けた実害がある。
+stale=""
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  no=$(printf '%s' "$row" | jq -r '.no'); rp=$(printf '%s' "$row" | jq -r '.repo // ""')
+  [ -f "$MISSION/workers/$no/RETIRED" ] && continue
+  prnum=$(printf '%s' "$no" | sed 's/^f//')
+  case "$prnum" in ''|*[!0-9]*) continue ;; esac
+  [ -n "$rp" ] || continue
+  slug=$(git -C "$rp" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  [ -n "$slug" ] || continue
+  st=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null)
+  case "$st" in MERGED|CLOSED) stale="${stale}  ⬛ 部下${no}: PR #${prnum} は ${st} 済みなのに撤収されていない"$'\n' ;; esac
+done < "$ROSTER"
+if [ -n "$stale" ]; then
+  out="${out}★片付け漏れ（retire.sh を回す）"$'\n'"${stale}"$'\n'
+fi
+
 # 人間へ未報告の完了を最初に出す。「作業中は黙る」と「撤収は聞かない」を組み合わせると
 # 「完了も黙る」になりがちなので、構造的に突き付ける（実際に報告漏れが起きた）。
-if [ -s "$MISSION/completed.log" ]; then
+if [ "$LEDGER" != "--no-ledger" ] && [ -s "$MISSION/completed.log" ]; then
   unrep=$(awk -F'\t' 'NR==FNR{seen[$2]=1;next} !($2 in seen)' \
     "${MISSION}/reported.log" "$MISSION/completed.log" 2>/dev/null \
     || cat "$MISSION/completed.log")
   if [ -n "$unrep" ]; then
     out="${out}★人間へ未報告の完了（報告したら reported.log に追記する）"$'\n'
-    while IFS=$'\t' read -r at no nm; do
+    while IFS=$'\t' read -r at no nm dg; do
       [ -n "$no" ] && out="${out}  ✔ 部下${no} ${nm}（${at}）"$'\n'
+      [ -n "${dg:-}" ] && out="${out}      成果物: ${dg}"$'\n'
     done <<< "$unrep"
+    out="${out}  → **他の作業より先に、これを人間に報告する**"$'\n'
     out="${out}"$'\n'
   fi
 fi
