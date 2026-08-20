@@ -1,4 +1,4 @@
-# naogify claude-plugins
+# naogify skills
 
 Claude Code の個人用スキルを配布するための marketplace。
 
@@ -11,7 +11,7 @@ Claude Code の個人用スキルを配布するための marketplace。
 ## 導入
 
 ```
-/plugin marketplace add naogify/claude-plugins
+/plugin marketplace add naogify/skills
 /plugin install commander@naogify
 ```
 
