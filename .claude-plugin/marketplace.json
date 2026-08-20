@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "naogify",
+  "owner": {
+    "name": "naogify"
+  },
+  "metadata": {
+    "description": "naogify の個人用 Claude Code スキル集",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "commander",
+      "source": "./",
+      "description": "cmux のワークスペースを部下として並列に立ち上げ、複数タスクを同時に走らせて指揮する司令官モード"
+    }
+  ]
+}
