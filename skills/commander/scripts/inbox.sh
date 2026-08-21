@@ -44,7 +44,13 @@ while IFS= read -r row; do
   prnum=$(printf '%s' "$no" | sed 's/^f//')
   case "$prnum" in ''|*[!0-9]*) continue ;; esac
   [ -n "$rp" ] || continue
-  slug=$(git -C "$rp" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  # roster.jsonl の repo は基本 slug（owner/name）で入っている。過去の形式でローカルパスが
+  # 渡されていた場合だけ git remote から slug を導出する（slug 前提だと git -C がパスとして
+  # 解釈できず fatal で落ち、この片付け漏れ検知自体が丸ごと動かなくなっていた）。
+  slug="$rp"
+  if [ -d "$rp" ]; then
+    slug=$(git -C "$rp" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  fi
   [ -n "$slug" ] || continue
   st=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null)
   case "$st" in MERGED|CLOSED) stale="${stale}  ⬛ 部下${no}: PR #${prnum} は ${st} 済みなのに撤収されていない"$'\n' ;; esac
@@ -127,7 +133,18 @@ while IFS= read -r row; do
         REPORT|QUESTION|BLOCKED|PROGRESS|PLAN) buf="${buf}  🔔 [${t}] ${b}"$'\n' ;;
         *)
           case "$s$b" in
-            *Completed*|*完了*) buf="${buf}  ⏹ 手が空いた（${s}）— REPORT が無いなら異常終了か待機中"$'\n' ;;
+            *Completed*|*完了*)
+              # cmux の agent hook 通知は、部下がまだ作業中（画面に "Forging…" 等が出ている）
+              # でも "Completed" を出すことがある（実際に 6 回以上、全部が誤検知だった）。
+              # 画面が本当に停止しているかを軽く裏取りしてから出す。「esc to interrupt」が
+              # 見えるならまだ動いているので、この行自体を出さない（ノイズを減らす方が
+              # 検知能力は上がる。裏取りできない＝画面が読めない場合は空振りより実害の方が
+              # 大きいので出す側に倒す）。
+              scr2=$(cmux read-screen --workspace "$ref" --lines 6 2>/dev/null)
+              case "$scr2" in
+                *"esc to interrupt"*) : ;;
+                *) buf="${buf}  ⏹ 手が空いた（${s}）— REPORT が無いなら異常終了か待機中"$'\n' ;;
+              esac ;;
             *[Ww]aiting*|*入力待*) buf="${buf}  ⌨ 入力待ちで止まっている（${s}）"$'\n' ;;
             *) buf="${buf}  • ${t} / ${s} / ${b}"$'\n' ;;
           esac ;;
