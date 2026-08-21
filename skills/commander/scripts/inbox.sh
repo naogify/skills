@@ -61,8 +61,15 @@ fi
 
 # 人間へ未報告の完了を最初に出す。「作業中は黙る」と「撤収は聞かない」を組み合わせると
 # 「完了も黙る」になりがちなので、構造的に突き付ける（実際に報告漏れが起きた）。
+#
+# 突き合わせは FILENAME で行う（`NR==FNR` ではない）。`reported.log` がまだ 1 行も無い
+# （ミッション最初の完了報告がまだ人間に伝わっていない、一番検知したい瞬間）とき、
+# `NR==FNR` は「1 番目のファイルが 0 行なら 2 番目のファイルの最初の行でも NR==FNR が
+# 真になる」という awk の落とし穴を踏み、その 1 行を誤って `seen` に入れて握りつぶす
+# （検証: 空の reported.log に対して `NR==FNR` は最初の未報告完了を出力しない）。
 if [ "$LEDGER" != "--no-ledger" ] && [ -s "$MISSION/completed.log" ]; then
-  unrep=$(awk -F'\t' 'NR==FNR{seen[$2]=1;next} !($2 in seen)' \
+  unrep=$(awk -F'\t' -v rep="${MISSION}/reported.log" \
+    'FILENAME==rep{seen[$2]=1;next} !($2 in seen)' \
     "${MISSION}/reported.log" "$MISSION/completed.log" 2>/dev/null \
     || cat "$MISSION/completed.log")
   if [ -n "$unrep" ]; then
@@ -157,8 +164,10 @@ while IFS= read -r row; do
 done < "$ROSTER"
 
 if [ "$PEEK" != "--peek" ]; then
-  # 今回触らなかったキー（撤収済みの部下など）の行を落とさずに引き継ぐ
-  awk -F'\t' 'NR==FNR{seen[$1]=1;next} !($1 in seen)' "$NEW_STATE" "$STATE" >> "$NEW_STATE" \
+  # 今回触らなかったキー（撤収済みの部下など）の行を落とさずに引き継ぐ。
+  # FILENAME で突き合わせる（`NR==FNR` は 1 番目のファイルが 0 行だと 2 番目の最初の行でも
+  # 真になる。上の未報告完了の突き合わせと同じ落とし穴なので同じ形に揃える）。
+  awk -F'\t' -v new="$NEW_STATE" 'FILENAME==new{seen[$1]=1;next} !($1 in seen)' "$NEW_STATE" "$STATE" >> "$NEW_STATE" \
     || die "状態ファイルの引き継ぎに失敗"
   cp "$NEW_STATE" "$STATE" || die "状態ファイルの更新に失敗"
 fi
