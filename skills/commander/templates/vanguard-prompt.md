@@ -33,7 +33,27 @@ gh issue list --repo <owner/repo> --state open --json number,title,labels,update
 # 本当に人間のレビューが付いているか（CodeRabbit だけなら実質未レビュー）
 gh pr view <n> --repo <owner/repo> --json reviews,comments,statusCheckRollup,headRefOid
 # CodeRabbit がレート制限で実質レビューできていないケースがある。check の description を見る
+
+# 会話コメント全文（--json comments だけでは全文が読めない場合がある。必ずこちらも通す）
+gh pr view <n> --repo <owner/repo> --comments
 ```
+
+**`gh pr view <n> --comments`（会話コメント全文）は必須で読む。** `reviewThreads` /
+`--json reviews` は**レビューという形式で付いた**指摘しか拾わない。人間本人が**通常の
+issue comment**に結論を書いていても、これらのクエリでは取り逃がす（実例: 人間が「この PR は
+別 PR に統合してクローズすべき」と書いていたのに、`reviewThreads`/`reviews` だけを見た結果
+「CodeRabbit のみ＝実質未レビュー」と判定し、対になる PR と一緒に統合対象に入れてしまいそうに
+なった。片方が削除するファイルをもう片方のテストが import しており、コンパイルエラーも出ずに
+設定が静かに既定値へ戻る組み合わせだった。担当が会話コメントで人間の結論を見つけて QUESTION を
+上げたために防げた）。
+
+「CodeRabbit のみ＝実質未レビュー」と判定する前に、**会話コメントに人間本人の結論**
+（推奨・クローズ提案・他 PR への統合提案）が無いかを必ず確認する。見つけたら、それを
+覆さずに編成案に反映するか、`QUESTION.md` で申し送る。
+
+**同じ機能領域の複数 PR は、テキスト衝突が無くても意味的に衝突しうる。** 片方を統合・並列の
+対象にするなら、もう片方との組み合わせを確認する（片方が削除するファイルをもう片方が参照している、
+シグネチャ変更、型アサーション経由で既定値に静かに戻る、等）。気付いたら `notes` に申し送る。
 
 優先順位の基準（上が強い）:
 
