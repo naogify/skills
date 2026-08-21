@@ -27,8 +27,11 @@ push / PR 作成 / マージ / issue 起票 / コメント投稿は**すべて�
 - 部下の `REPORT.md` が書かれず、**完了台帳に成果物が残らない**（報告が「撤収しました」だけになる）
 - 撤収の引き金が消え、**ワークスペースと worktree が残り続ける**（実際に残した）
 - 部下は「まだ自分の仕事が残っている」と思って待機し続ける
-自分で 1 つのタスクを完結させたいなら、このスキルは使わない（`/fix-pr` `/create-pr` 等の通常フロー、または単発の `/sonnet`）。
-**このスキルの価値は「並列」と「指揮」にある。** 部下が 1 人しか要らないなら `/sonnet` の方が軽い。
+自分で 1 つのタスクを完結させたいなら、このスキルは使わない（`/fix-pr` `/create-pr` 等の通常フロー）。
+**このスキルの価値は「並列」と「指揮」にある。** 部下が 1 人しか要らないタスクには、
+単発で完結する軽いフロー（環境にあれば）の方が指揮のオーバーヘッドが無い分軽い。
+そういうフローが無い、または既に commander を起動した後に依頼が 1 件だけだったなら、
+**部下 1 人の commander として素直に進めてよい**（別のスキルの有無に依存しない）。
 
 ## 大原則
 
@@ -207,13 +210,30 @@ cd <リポジトリのローカルパス>
 git fetch origin
 git worktree list                                    # 古い worktree が溜まっていないか先に見る
 git worktree add .worktrees/<repo>-<task> -b <branch> origin/<base>
-cd .worktrees/<repo>-<task> && npm install           # worktree は node_modules を共有しない
+cd .worktrees/<repo>-<task>
+
+# パッケージマネージャは lockfile から機械的に判定する（固定で npm を打つと外れる。
+# pnpm のリポジトリで npm install を打って部下が詰まった実害がある）
+[ -f pnpm-lock.yaml ] && pnpm install
+[ -f yarn.lock ]       && yarn install
+[ -f package-lock.json ] && npm install
+# どれも無ければ package.json の packageManager フィールドを見るか、親 worktree の
+# 既存の node_modules/lockfile を確認してから判断する（worktree は node_modules を共有しない）
+
+# gitignore されている環境ファイル（.env* 等）は worktree に無い。親から明示的にコピーする
+# （`apps/web/.env.local` が無いと DB に触れず詰まる、を毎回手で直した実害がある）
+for f in <リポジトリのローカルパス>/.env* <リポジトリのローカルパス>/apps/*/.env*; do
+  [ -f "$f" ] && cp "$f" "./${f#<リポジトリのローカルパス>/}" 2>/dev/null
+done
+
 pwd && git branch --show-current && git log --oneline -1   # 実際に正しいベースから切れたか確認
 ```
 
 - **`scgp-app` は `origin/develop` から切る。** api / cli は `origin/main`。
 - **worktree を部下間で共有しない**（1 部下 1 worktree）。共有すると片方の `npm install` や
   ブランチ切り替えでもう片方が壊れる。
+- **`.env*` の中身はリポジトリごとに違う。** 上のループはひな形。実際にどのファイルが要るかは
+  該当リポジトリの README / 既存 worktree を見て決める（機械的にコピーしていい範囲を確認する）。
 
 ## Phase 3 — 指令書を書く
 
@@ -400,6 +420,11 @@ bash $SKILL/scripts/watch.sh "$MISSION"
 ```bash
 CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 60
 ```
+
+**画面を見たときに ctx（context 使用率）が高い（目安: 150% 超）部下がいたら**、`NOTES.md`
+（`workers/<no>/PROMPT.md` が指示している）を書いたかを確認し、まだなら
+`cmux send` で「調査結果と確定方針を NOTES.md に書き出せ」と指示する。ctx が膨らみ切ってから
+セッションが切れると、引き継ぎの手がかりが無くなる（実例: 部下が `ctx 234%` まで到達した）。
 
 ## Phase 6 — 受信種別ごとの対応
 
@@ -611,10 +636,17 @@ bash $SKILL/scripts/retire.sh "$MISSION" <no>
 `retire.sh` は以下を確認し、**1 つでも引っかかったら消さずに理由を出して終わる**:
 
 - worktree に未 commit の変更が無いか（`git status --porcelain`）
-- ベースブランチに対して未 push の commit が無いか（`git log origin/<base>..HEAD`）
+- **`git fetch origin` してから**、upstream（`@{u}`）に対して未 push の commit が無いか
+  （`git log @{u}..HEAD`）。**fetch を省くと、PR がマージされた直後（＝いちばん撤収したいタイミング）
+  に古い ref のまま「未 push」と誤判定する**（実際に起きた）。判定は必ず fetch の後に行う
 - 部下が `REPORT.md`（先鋒なら `PLAN.md`）を書いているか（書いていない = まだ終わっていない）
 
 引っかかった場合は**人間に上げる**。`--force` は人間が明示的に「捨ててよい」と言ったときだけ使う。
+
+**判定を先・破壊を後にする。** `retire.sh` は worktree の削除を `close-workspace` より**前**に試す。
+順序が逆だと、ワークスペースを閉じた後に worktree 削除が失敗し、「部下はもう居ないのに worktree は
+残る」という復旧不能な状態になる（実際に起きた）。worktree 削除で失敗する分には、まだ何も
+壊していないので安全に止まれる。
 
 ### 撤収は「資源を返すところまで」やる
 
@@ -841,18 +873,41 @@ CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 40 \
 差し戻し前と同じ head SHA のまま「全部緑です」と来たら、それは**指示が届いていない古い報告**。
 中身は一切見ずに無効化し、指示を届け直す。
 
-### 新しい worktree では「このフォルダを信頼するか」で全員止まる（実測）
+### 起動直後に出る罠は 2 種類ある。片方だけ通すと部下が即死する（実測）
 
-`--dangerously-skip-permissions` を付けても、**claude が初めて見るディレクトリでは
-`Do you trust this folder?` の選択画面が出て起動しない**。作りたての worktree は必ずこれに当たる。
-起動直後の `read-screen` で検出し、Enter を送って通す:
+`spawn.sh` が自動で両方処理するが、手で `cmux new-workspace` を叩いたときは自分でこれをやる。
+
+1. **`Do you trust this folder?`** — claude が初めて見るディレクトリで出る。作りたての
+   worktree は必ずこれに当たる。**Enter だけで通る。**
+2. **`Bypass Permissions` の 2 択** — `--dangerously-skip-permissions` を付けたときに
+   実際に出るのはこれで、`Do you trust this folder?` ではない:
+   ```
+     WARNING: Claude Code running in Bypass Permissions mode
+     ...
+     ❯ 1. No, exit
+       2. Yes, I accept
+     Enter to confirm · Esc to cancel
+   ```
+   既定でカーソルが `1. No, exit` に乗っている。**Enter だけ送ると `1. No, exit` が選ばれて
+   部下が即死する**（実際に起きた。手順を信じて Enter だけ送っていたら 4 人とも死んでいた）。
+   **down → Enter** で `2. Yes, I accept` を選ぶ必要がある。
+
+起動直後の `read-screen` で検出し、出ている方に応じて送る（1 ターンで両方出ることもあるので
+どちらかを処理したら抜けない。`spawn.sh` の起動確認ループが両方を通すまでループするのはそのため）:
 
 ```bash
-CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 12 | grep -q "trust this folder" \
-  && CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter
+scr=$(CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 20)
+case "$scr" in
+  *"No, exit"*"Yes, I accept"*|*"Bypass Permissions mode"*)
+    CMUX_QUIET=1 cmux send-key --workspace workspace:<N> down
+    CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter ;;
+  *"trust this folder"*)
+    CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter ;;
+esac
 ```
 
-**起動確認を省くと、4 人とも 1 文字も進まないまま「静かに待っている」状態になる。**
+**起動確認を省くと、4 人とも 1 文字も進まないまま「静かに待っている」状態になる**
+（`Bypass Permissions` を Enter だけで通した場合は「静かに待っている」ではなく**即終了する**）。
 Phase 4 の `read-screen` は飾りではない。
 
 ### 並列数を欲張らない

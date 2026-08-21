@@ -22,6 +22,33 @@ repo=$(printf '%s' "$row" | jq -r '.repo // ""')
 base=$(printf '%s' "$row" | jq -r '.base // ""')
 WDIR="$MISSION/workers/$NO"
 
+# ── `repo` フィールドの解釈 ──
+# `spawn.sh` の usage 上は「gh --repo に渡す slug（owner/name）」の意味で、roster.jsonl の
+# 実データも全部 slug（例: "cabinetwork/internal-apps-v1"）。しかし過去のコードは repo を
+# そのままパスとして git -C に渡していたため、slug が来ると `git -C '<slug>' ...` が
+# fatal で落ちていた（実際に落ちて、ワークスペースだけ閉じて worktree が残った）。
+# ここでは既存のディレクトリだけを「パスとして渡された repo」とみなし、それ以外は slug として扱う
+# （どちらの形式が来ても壊れないようにする）。
+root=""
+slug="$repo"
+if [ -n "$repo" ] && [ -d "$repo" ]; then
+  # 過去の形式・手動指定でローカルパスが渡された場合はそのまま root として使う
+  root="$repo"
+  slug=$(git -C "$repo" remote get-url origin 2>/dev/null \
+           | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  [ -n "$slug" ] || slug="$repo"
+fi
+# リポジトリのルートは worktree から機械的に導出できる。repo が slug（パスでない）場合は
+# ここが唯一の root の出処になる。
+if [ -z "$root" ] && [ -n "$wt" ] && [ -d "$wt" ]; then
+  root=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's#/\.git$##')
+fi
+# slug がまだ無ければ worktree の origin から取る（gh pr view / gh api に使う）
+if [ -z "$slug" ] && [ -n "$wt" ] && [ -d "$wt" ]; then
+  slug=$(git -C "$wt" remote get-url origin 2>/dev/null \
+           | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+fi
+
 if [ "$FORCE" != "--force" ]; then
   if [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
     # 報告が無くても、担当 PR が既にマージ / クローズされていれば完了と見なす
@@ -30,9 +57,7 @@ if [ "$FORCE" != "--force" ]; then
     prstate=""
     case "$prnum" in
       ''|*[!0-9]*) : ;;
-      *) slug=$(git -C "${repo:-.}" remote get-url origin 2>/dev/null \
-            | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
-         [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
+      *) [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
     esac
     case "$prstate" in
       MERGED|CLOSED) printf '報告は無いが PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
@@ -45,13 +70,26 @@ if [ "$FORCE" != "--force" ]; then
   if [ -n "$wt" ] && [ -d "$wt" ]; then
     dirty=$(git -C "$wt" status --porcelain 2>/dev/null)
     [ -z "$dirty" ] || hold "未 commit の変更が残っている: $wt"$'\n'"$dirty"
-    # 「未 push」は upstream（origin/<同名ブランチ>）と比べる。
-    # origin/<base> と比べると squash マージ後に誤検知する
-    # （squash では元の commit が base の祖先にならないため、マージ済みでも「未 push」に見える）。
+
+    # 未 push 判定の前に fetch する。fetch せずに古い ref のまま比べると、
+    # PR がマージされた直後（＝いちばん撤収したいタイミング）に必ず「未 push」と誤判定する。
+    # `@{u}`（upstream）が origin/<base> を指すよう設定されたブランチ（`git worktree add -b <br>
+    # origin/<base>` で作ると既定でこうなる）では、fetch していない origin/<base> は
+    # マージ済みの commit を反映しておらず、実際に PR マージ直後に誤判定した実害がある。
+    if fetch_out=$(git -C "$wt" fetch origin 2>&1); then
+      :
+    else
+      printf 'warn: git fetch origin に失敗した。以降の未 push 判定は古い ref に基づく可能性がある\n' >&2
+      printf '      %s\n' "$fetch_out" >&2
+    fi
+
+    # 「未 push」は upstream（`@{u}`）と比べる。origin/<base> と比べると squash マージ後に
+    # 誤検知する（squash では元の commit が base の祖先にならないため、マージ済みでも
+    # 「未 push」に見える）。fetch は上の一手で済ませてあるので、ここでは新しい ref で比べる。
     up=$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
     if [ -n "$up" ]; then
       ahead=$(git -C "$wt" log --oneline "$up..HEAD" 2>/dev/null)
-      [ -z "$ahead" ] || hold "未 push の commit が残っている（$up 比）: $wt"$'\n'"$ahead"
+      [ -z "$ahead" ] || hold "未 push の commit が残っている（$up 比。直前に fetch 済み）: $wt"$'\n'"$ahead"
     else
       # upstream が無い = リモートブランチが消えている。
       # マージ時の --delete-branch でこうなるのが通常。念のため人間に見える形で出す。
@@ -65,6 +103,24 @@ fi
 BR=""
 if [ -n "$wt" ] && [ -d "$wt" ]; then
   BR=$(git -C "$wt" branch --show-current 2>/dev/null)
+fi
+
+# ── worktree の削除は close-workspace より先に試す（判定を先・破壊を後） ──
+# 順序が逆だと、ワークスペースを閉じた後に worktree 削除が失敗し、「部下はもう居ないのに
+# worktree は残る」という復旧不能な中途半端な状態になる（`repo` がパスとして扱われて
+# fatal で落ち、実際にこの状態になった）。ここで失敗する分には、まだ何も壊していないので
+# 安全に die できる。
+if [ -n "$wt" ] && [ -d "$wt" ]; then
+  if [ "$FORCE" = "--force" ]; then
+    git -C "$wt" worktree remove --force "$wt" 2>/dev/null \
+      || git -C "${root:-.}" worktree remove --force "$wt" \
+      || die "worktree 削除に失敗（--force でも消せない。ワークスペースはまだ閉じていない）: $wt"
+  else
+    git -C "${root:-$wt}" worktree remove "$wt" \
+      || die "worktree 削除に失敗（未コミットの変更が残っている可能性。ワークスペースはまだ閉じていない）: $wt"
+  fi
+  [ -n "$root" ] && git -C "$root" worktree prune 2>/dev/null
+  printf 'worktree を削除した: %s\n' "$wt"
 fi
 
 # ── 撤収前の資源を記録（解放できたかを後で比べる） ──
@@ -98,32 +154,22 @@ if [ -n "$leftover" ]; then
   fi
 fi
 
-if [ -n "$wt" ] && [ -d "$wt" ]; then
-  root=${repo:-$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's#/\.git$##')}
-  if [ "$FORCE" = "--force" ]; then
-    git -C "$wt" worktree remove --force "$wt" 2>/dev/null \
-      || git -C "${root:-.}" worktree remove --force "$wt" \
-      || printf 'warn: worktree 削除に失敗: %s\n' "$wt" >&2
-  else
-    git -C "${root:-$wt}" worktree remove "$wt" || die "worktree 削除に失敗（未コミットの変更が残っている可能性）: $wt"
-  fi
-  [ -n "${root:-}" ] && git -C "$root" worktree prune 2>/dev/null
-  printf 'worktree を削除した: %s\n' "$wt"
-  printf 'ヒント: マージ済みならブランチも消す → git -C %s branch -d <branch>（-D は使わない）\n' "${root:-<repo>}"
-fi
-
 # ── マージ済みブランチを消す（-d は未マージなら拒否するので安全） ──
-if [ -n "$repo" ] && [ -d "$repo" ]; then
+if [ -n "$root" ] && [ -d "$root" ]; then
   if [ -n "$BR" ]; then
-    if git -C "$repo" branch -d "$BR" 2>/dev/null; then
+    if git -C "$root" branch -d "$BR" 2>/dev/null; then
       printf 'マージ済みブランチを削除した: %s\n' "$BR"
     else
       printf '未マージなのでブランチは残した: %s\n' "$BR"
     fi
   fi
-  git -C "$repo" worktree prune 2>/dev/null
+  git -C "$root" worktree prune 2>/dev/null
 fi
 
+# ── ここまで来たら撤収は完了している。RETIRED は必ず書く ──
+# （途中で die するのは worktree 削除より前だけなので、ここに到達した時点で
+# ワークスペースと worktree はもう存在しない。RETIRED を書き忘れると、watch.sh /
+# inbox.sh / board.sh が撤収済みの部下を稼働中として扱い続ける）。
 date -u +%Y-%m-%dT%H:%M:%SZ > "$WDIR/RETIRED"
 
 # 完了台帳に追記する。inbox.sh がこれと reported.log を比べて

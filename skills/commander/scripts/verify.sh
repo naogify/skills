@@ -64,8 +64,12 @@ if [ -n "$wt" ] && [ -d "$wt" ]; then
     [ "$n" -gt 0 ] 2>/dev/null && ok "origin/$base に対して $n commit" \
       || printf '  WARN origin/%s に対する commit が 0（読み取りタスクなら正常）\n' "$base"
   fi
-  # 報告に書かれた commit ハッシュが実在するか
-  for h in $(LC_ALL=C grep -aoE '\b[0-9a-f]{7,40}\b' "$REP" 2>/dev/null | sort -u | head -5); do
+  # 報告に書かれた commit ハッシュが実在するか。
+  # UUID（8-4-4-4-12）の断片は 7〜40 桁の16進文字列に見えるため、そのまま拾うと
+  # DB の id を書くタスクで毎回 WARN が出て、本物の「捏造ハッシュ」検知が埋もれる
+  # （実際に起きた）。先に UUID 全体を取り除いてからハッシュ候補を拾う。
+  stripped=$(LC_ALL=C sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}//g' "$REP" 2>/dev/null)
+  for h in $(printf '%s' "$stripped" | LC_ALL=C grep -aoE '\b[0-9a-f]{7,40}\b' | sort -u | head -5); do
     git -C "$wt" cat-file -e "$h^{commit}" 2>/dev/null && ok "報告の commit $h は実在する" \
       || printf '  WARN 報告中の %s は commit として解決できない（ハッシュ以外の文字列かもしれない）\n' "$h"
   done
@@ -84,7 +88,13 @@ fi
 #     環境変数 COMMANDER_XREF_REPOS（空白区切り）か mission ディレクトリの
 #     xref-repos.txt（1行1リポジトリ）で設定する（api/app のような対を組むミッションで使う）。
 if [ -s "$REP" ] && [ -n "$repo" ]; then
-  slug=$(git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  # roster.jsonl の repo は基本 slug（owner/name）で入っている。過去の形式でローカルパスが
+  # 渡されていた場合だけ git remote から slug を導出する（slug 前提だと git -C がパスとして
+  # 解釈できず fatal で落ち、この検収項目が丸ごと動かなくなっていた＝捏造を検出できていなかった）。
+  slug="$repo"
+  if [ -d "$repo" ]; then
+    slug=$(git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  fi
   xref_repos="${COMMANDER_XREF_REPOS:-}"
   [ -s "$MISSION/xref-repos.txt" ] && xref_repos="$xref_repos $(tr '\n' ' ' < "$MISSION/xref-repos.txt")"
 
