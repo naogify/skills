@@ -72,12 +72,46 @@ if [ -n "$wt" ] && [ -d "$wt" ]; then
 fi
 
 # 4. 「起票した」「投稿した」と書かれた issue / PR が実在するか
+#
+# api / app のように対の PR で開発が進むリポジトリ群では、報告は自分のリポジトリではない
+# 番号を正しく参照することが頻出する（例:「app 側 #467」「geolonia/smartcity-smartmap-v3#527」）。
+# 自分のリポジトリだけで照会すると、これらの**正しい**他リポジトリ参照まで
+# 「存在しない（捏造かタイポ）」と誤判定して差し戻しを出す（実際に起きた）。
+#
+# 4a. 明示的に「owner/repo#番号」と書かれた参照は、書かれたリポジトリで直接照会する（設定不要）。
+# 4b. それ以外の裸の「#番号」（プローズで「app 側 #467」のように書かれる）は、自分のリポジトリで
+#     見つからなければ設定済みの照会先リポジトリでも探す。照会先はここにハードコードせず、
+#     環境変数 COMMANDER_XREF_REPOS（空白区切り）か mission ディレクトリの
+#     xref-repos.txt（1行1リポジトリ）で設定する（api/app のような対を組むミッションで使う）。
 if [ -s "$REP" ] && [ -n "$repo" ]; then
   slug=$(git -C "$repo" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  xref_repos="${COMMANDER_XREF_REPOS:-}"
+  [ -s "$MISSION/xref-repos.txt" ] && xref_repos="$xref_repos $(tr '\n' ' ' < "$MISSION/xref-repos.txt")"
+
   if [ -n "$slug" ]; then
+    seen_nums=""
+    while IFS= read -r qline; do
+      [ -n "$qline" ] || continue
+      qrepo="${qline%#*}"; qnum="${qline##*#}"
+      qst=$(gh api "repos/${qrepo}/issues/${qnum}" --jq '.state' 2>/dev/null) || qst=""
+      if [ -n "${qst:-}" ]; then ok "${qrepo}#${qnum} は実在する（state=${qst}）"
+      else bad "${qrepo}#${qnum} が存在しない（報告の捏造かタイポ）"; fi
+      seen_nums="${seen_nums} ${qnum}"
+    done < <(LC_ALL=C grep -aoE '[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]{2,5}' "$REP" | sort -u | head -8)
+
     for num in $(LC_ALL=C grep -aoE '#[0-9]{2,5}' "$REP" | tr -d '#' | sort -u | head -8); do
+      case " $seen_nums " in *" $num "*) continue ;; esac  # owner/repo#番号 として既に照会済み
       st=$(gh api "repos/${slug}/issues/${num}" --jq '.state' 2>/dev/null) || st=""
-      [ -n "${st:-}" ] && ok "#${num} は実在する（state=${st}）" || bad "#${num} が存在しない（報告の捏造かタイポ）"
+      if [ -n "${st:-}" ]; then ok "#${num} は実在する（state=${st}）"; continue; fi
+      found=""
+      for xr in $xref_repos; do
+        [ -n "$xr" ] || continue
+        xst=$(gh api "repos/${xr}/issues/${num}" --jq '.state' 2>/dev/null) || xst=""
+        if [ -n "${xst:-}" ]; then
+          ok "#${num} は ${xr} に実在する（state=${xst}。他リポジトリ参照）"; found=1; break
+        fi
+      done
+      [ -n "$found" ] || bad "#${num} が存在しない（${slug} と設定済みの照会先で見つからない。捏造かタイポ）"
     done
   fi
 fi

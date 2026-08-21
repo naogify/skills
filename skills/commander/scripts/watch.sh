@@ -15,6 +15,49 @@ MISSION=$1; MAX=${2:-3600}; IV=${3:-60}
 ROSTER="$MISSION/roster.jsonl"
 [ -s "$ROSTER" ] || die "部下がいない: $ROSTER"
 INBOX="$(cd "$(dirname "$0")" && pwd)/inbox.sh"
+STALL_STATE="$MISSION/watch.stall.state"
+touch "$STALL_STATE" 2>/dev/null || true
+
+# 画面が「動いている」と判断するパターン。
+# これに当たる画面を「待ちで止まった」と判定すると、正当にブロックしている部下を
+# 停止扱いにしてしまい、同じ条件で毎ポーリング即再発火する（実際に起きた。司令官のターンを食い潰した）:
+#   - `Waiting for N background agent to finish`（自分が起動した background agent の完了待ち。
+#     完了すればハーネスが叩き起こすので放置してよい）
+#   - `ctrl+b to run in background`（長いシェルコマンドの実行中）
+#   - スピナー行（`✻ Cooking… (3m 21s · ↓ 4.2k tokens)` 等。文言は変わるので
+#     経過時間の形 `(12s ·` / `(3m 21s ·` で見る）
+is_active() {
+  case "$1" in
+    *"esc to interrupt"*)                return 0 ;;
+    *"ctrl+b to run in background"*)      return 0 ;;
+    *"Waiting for "*"background agent"*)  return 0 ;;
+    *"tokens)"*)                          return 0 ;;
+  esac
+  printf '%s' "$1" | grep -qE '\([0-9]+m? ?[0-9]*s · ' && return 0
+  printf '%s' "$1" | grep -qE '^[[:space:]]*[✻✳✢✽◑◯⏺][[:space:]]' && return 0
+  return 1
+}
+
+# 「待ち」でターンを終えた候補を1回ぶん観測する。出力は "no<TAB>画面ハッシュ" の行。
+# 1回のスナップショットだけで判定すると、画面が切り替わる瞬間を拾って誤検知するため、
+# 呼び出し側で間隔をあけて2回呼び、両方で同じ部下が残ったときだけ報告する。
+scan_waiting() {
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    no=$(printf '%s' "$row" | jq -r '.no'); ref=$(printf '%s' "$row" | jq -r '.ws_ref')
+    [ -f "$MISSION/workers/$no/RETIRED" ] && continue
+    [ -s "$MISSION/workers/$no/REPORT.md" ] && continue
+    scr=$(cmux read-screen --workspace "$ref" --lines 14 2>/dev/null)
+    [ -n "$scr" ] || continue
+    is_active "$scr" && continue
+    case "$scr" in
+      *[Ww]ait*|*待*)
+        h=$(printf '%s' "$scr" | cksum | awk '{print $1}')
+        printf '%s\t%s\n' "$no" "$h"
+        ;;
+    esac
+  done < "$ROSTER"
+}
 
 waited=0
 while :; do
@@ -43,24 +86,29 @@ while :; do
   # 「待ち」で止まった部下の検知。
   # 部下は「CI を待つ」と判断してターンを終えることがある。誰も起こさないので永久に止まる。
   # todo が進まないまま一定時間が経ったら、司令官が代わりに外側（CI / PR の状態）を確認して押す。
-  waiting=""
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    no=$(printf '%s' "$row" | jq -r '.no'); ref=$(printf '%s' "$row" | jq -r '.ws_ref')
-    [ -f "$MISSION/workers/$no/RETIRED" ] && continue
-    [ -s "$MISSION/workers/$no/REPORT.md" ] && continue
-    scr=$(cmux read-screen --workspace "$ref" --lines 12 2>/dev/null)
-    case "$scr" in
-      *"esc to interrupt"*) : ;;                      # 稼働中
-      *) case "$scr" in
-           *[Ww]ait*|*待*) waiting="${waiting}${no} " ;;  # 「待つ」と言って turn を終えている
-         esac ;;
-    esac
-  done < "$ROSTER"
-  if [ -n "$waiting" ]; then
-    printf 'watch: 「待ち」でターンを終えて止まっている部下: %s\n' "$waiting"
-    printf 'watch: 司令官が gh pr checks で外側の状態を確認し、済んでいれば cmux send で押すこと\n'
-    exit 0
+  #
+  # ただし `Waiting for N background agent` やスピナー表示は**正当にブロックしている状態**であり、
+  # 単純な `Wait`/`待` 文字列一致だけで停止扱いにすると、同じ画面で毎ポーリング即再発火して
+  # 司令官のターンを食い潰す（実際に起きた）。is_active に当たる画面は候補から外し、
+  # 間隔をあけて2回観測して両方 stalled のときだけ報告し、同じ (部下, 画面ハッシュ) は再通知しない。
+  first="$(scan_waiting)"
+  if [ -n "$first" ]; then
+    sleep 20
+    second="$(scan_waiting)"
+    report=""
+    while IFS=$'\t' read -r no h; do
+      [ -n "$no" ] || continue
+      printf '%s' "$second" | grep -q "^${no}	" || continue        # 2回目で消えた=動いた
+      grep -q "^${no}	${h}$" "$STALL_STATE" 2>/dev/null && continue  # 同じ停止は再報告しない
+      report="${report}${no} "
+      printf '%s\t%s\n' "$no" "$h" >> "$STALL_STATE"
+    done <<< "$first"
+    if [ -n "$report" ]; then
+      printf 'watch: 「待ち」でターンを終えて止まっている部下: %s\n' "$report"
+      printf 'watch: 司令官が gh pr checks で外側の状態を確認し、済んでいれば cmux send で押すこと\n'
+      printf 'watch: 画面が動いていれば誤検知。同じ画面では再通知しないので放置してよい\n'
+      exit 0
+    fi
   fi
 
   # 沈黙の検知: 報告が無いまま長時間経った部下を知らせる（agent hook の通知に頼らない）
