@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # 部下を 1 人起動する。
 #   spawn.sh <mission-dir> <no> <部下名> <説明> <cwd> [worktree] [repo] [base]
+# [repo] は GitHub の slug（owner/name。gh --repo に渡す形）で渡す。ローカルパスではない
+# （retire.sh が repo を機械的に扱えるのは worktree から git で導出した値だけで、
+#  ここで渡した文字列をパスとして使うことはない）。
 # 事前に <mission>/workers/<no>/PROMPT.md を書いておくこと。
 # 起動できたら "OK workspace:<N>" と ref を出し、roster.jsonl に 1 行追記する。
 set -uo pipefail
@@ -101,13 +104,31 @@ jq -e --arg no "$NO" 'select((.no|tostring)==$no)' "$MISSION/roster.jsonl" >/dev
 # 進捗バーもログも出さない。サイドバーに出るのは
 # タイトル / 説明 / チェックリスト / パス / agent hook の Needs input ピル だけにする
 
-# 新しいディレクトリでは claude が "Do you trust this folder?" で止まる。通す
-for _ in 1 2 3 4 5 6; do
+# 起動直後に出うる罠を自動で通す。1 ターンで両方出ることがあるので、
+# 「走り始めた」と確認できるまでループを続ける（片方を処理したら break で抜けない）。
+#
+# 罠 1: 新しいディレクトリでは "Do you trust this folder?" で止まる → Enter で通る。
+# 罠 2: `--dangerously-skip-permissions` を付けると実際に出るのは
+#   "Bypass Permissions" の 2 択（"1. No, exit" / "2. Yes, I accept"）であって
+#   "trust this folder" ではない。既定で `1. No, exit` にカーソルが乗っているため、
+#   Enter だけ送ると **部下が即死する**（実際に起きた）。down → Enter で
+#   `2. Yes, I accept` を選ぶ必要がある。
+for _ in 1 2 3 4 5 6 7 8; do
   sleep 3
-  scr=$(cmux read-screen --workspace "$ref" --lines 15 2>/dev/null)
+  scr=$(cmux read-screen --workspace "$ref" --lines 20 2>/dev/null)
   case "$scr" in
-    *"trust this folder"*) cmux send-key --workspace "$ref" enter >/dev/null 2>&1; break ;;
-    *"esc to interrupt"*|*"Bypassing Permissions"*) break ;;
+    *"esc to interrupt"*|*"Bypassing Permissions"*) break ;;  # 既に起動して走っている
+  esac
+  case "$scr" in
+    *"No, exit"*"Yes, I accept"*|*"Bypass Permissions mode"*)
+      cmux send-key --workspace "$ref" down  >/dev/null 2>&1
+      cmux send-key --workspace "$ref" enter >/dev/null 2>&1
+      continue ;;
+  esac
+  case "$scr" in
+    *"trust this folder"*)
+      cmux send-key --workspace "$ref" enter >/dev/null 2>&1
+      continue ;;
   esac
 done
 
