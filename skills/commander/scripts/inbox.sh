@@ -41,7 +41,13 @@ while IFS= read -r row; do
   [ -n "$row" ] || continue
   no=$(printf '%s' "$row" | jq -r '.no'); rp=$(printf '%s' "$row" | jq -r '.repo // ""')
   [ -f "$MISSION/workers/$no/RETIRED" ] && continue
-  prnum=$(printf '%s' "$no" | sed 's/^f//')
+  # PR番号は workers/<no>/PR.md の実物から読む。部下番号をそのままPR番号として使うと、
+  # 無関係な既存PR（例: 部下8 → 別件でマージ済みの PR #8）に衝突して「マージ済み」と
+  # 誤検知し、作業中の部下を撤収＝worktreeごと破棄させかねない（実際に誤報が出た）。
+  prf="$MISSION/workers/$no/PR.md"
+  [ -f "$prf" ] || continue
+  prnum=$(LC_ALL=C grep -aoE 'pull/[0-9]+' "$prf" 2>/dev/null | head -1 | sed 's|pull/||')
+  [ -n "$prnum" ] || prnum=$(LC_ALL=C grep -aoE '#[0-9]+' "$prf" 2>/dev/null | head -1 | tr -d '#')
   case "$prnum" in ''|*[!0-9]*) continue ;; esac
   [ -n "$rp" ] || continue
   # roster.jsonl の repo は基本 slug（owner/name）で入っている。過去の形式でローカルパスが
