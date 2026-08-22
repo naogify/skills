@@ -233,6 +233,32 @@ else
   bad 'spawn.sh が Bypass Permissions（down→enter）を処理していない（Enter だけだと部下が即死する）'
 fi
 
+# 6l) 重大3 の退行検査: inbox.sh の「片付け漏れ検知」が部下番号をそのままPR番号として扱わないか。
+#     実際の事故: 部下8 → 別件でマージ済みの無関係な既存 PR #8 に衝突し、「マージ済みなのに
+#     撤収されていない」と誤検知した。この誤報に従って retire.sh を回すと作業中の worktree ごと
+#     成果を破棄しかねない。部下番号が若いうちは既存PRとほぼ必ず衝突する構造的なバグだった。
+#     PR.md を持たない部下（＝そもそもPRが存在しない）で、gh pr view を一切呼ばず
+#     「片付け漏れ」も出ないことを確認する（gh を差し替えて呼び出し自体を検知する）。
+g4="$SANDBOX/g4"; mkdir -p "$g4/bin"
+mission="$g4/mission"
+mkdir -p "$mission/workers/8"
+gh_called="$g4/gh-called.log"; : > "$gh_called"
+cat > "$g4/bin/gh" <<GHSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_called"
+printf '"MERGED"\n'
+GHSTUB
+chmod +x "$g4/bin/gh"
+jq -nc '{no:"8",name:"g4",ws_ref:"",ws_id:"",repo:"naogify/skills"}' > "$mission/roster.jsonl"
+out4=$(PATH="$g4/bin:$PATH" bash "$D/inbox.sh" "$mission" --peek --no-ledger 2>&1)
+if [ ! -s "$gh_called" ] && ! printf '%s' "$out4" | grep -q '片付け漏れ'; then
+  ok '重大3 退行検査: PR.md が無い部下を部下番号=PR番号と誤認識しない（gh を呼ばず片付け漏れも出ない）'
+else
+  bad '重大3 の退行: PR.md が無いのに gh pr view を呼ぶ、または片付け漏れを誤検知する'
+  printf '%s\n' "$out4" | sed 's/^/      /' | head -6
+  printf '      gh呼び出し: %s\n' "$(cat "$gh_called")"
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
