@@ -84,6 +84,18 @@ else
   ok 'SKILL.md は $SKILL 相対で書かれている'
 fi
 
+# 6c-2) 統合担当テンプレに UI・UX検収台帳へ載せる指示が残っているか
+#       この 2 行が消えると、統合 PR が台帳に並ばず人間が確認すべき PR に気付けない。
+#       文言は消えても動作は壊れないので、検査で固定する。
+I="$D/../templates/integrator-prompt.md"
+if LC_ALL=C grep -aq 'ui-check' "$I" 2>/dev/null \
+   && LC_ALL=C grep -aq 'gh label create ui-check' "$I" 2>/dev/null \
+   && LC_ALL=C grep -aq 'プレビュー: <URL>' "$I" 2>/dev/null; then
+  ok '統合担当テンプレは ui-check ラベルとプレビュー行を指示している'
+else
+  bad '統合担当テンプレから UI・UX検収台帳の指示が消えている（ui-check ラベル / gh label create / プレビュー行）'
+fi
+
 # 6d) 部下テンプレに「CI を待つ」を仕事として書いていないか
 #     部下は待てない（ターンが終わると誰も起こさない）。実例: CI 緑・approve 済みで 42 分停止。
 if LC_ALL=C grep -aq 'gh pr checks' "$D/../templates/worker-prompt.md" 2>/dev/null \
