@@ -259,6 +259,93 @@ else
   printf '      gh呼び出し: %s\n' "$(cat "$gh_called")"
 fi
 
+# 6m) 構造検査: SKILL.md が「バックグラウンド完了通知の本文には watch.sh の中身が乗らない」ことと
+#     「読み飛ばさず出力を読む」手順を明記しているか。
+#     実際の事故: 通知本文が "Background command ... completed (exit code 0)" の定型文だけで、
+#     watch.sh が検知した中身（5人分の報告）が乗っておらず、司令官が「ただの完了通知」と
+#     読み飛ばして約20分報告に気付かなかった。ハーネス側の制約でスクリプトからは直せないため、
+#     手順（SKILL.md）側で「必ず出力を読む」を固定しておく必要がある。
+if LC_ALL=C grep -aq '完了通知の本文は空っぽ' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq 'その場で出力を読む' "$D/../SKILL.md" 2>/dev/null; then
+  ok 'SKILL.md はバックグラウンド完了通知を読み飛ばさない手順を明記している（事故1 の再発防止）'
+else
+  bad 'SKILL.md に「完了通知は読み飛ばさず出力を読む」手順が無い（事故1 の再発防止が抜けている）'
+fi
+
+# 6n) 実機テスト: watch.sh の is_active() が「稼働中」の画面を正しく「稼働中」と判定するか。
+#     ここを誤って「待ち」と判定すると、正当にブロック中の部下を毎ポーリング停止扱いにして
+#     事故2（同じ部下について繰り返し誤検知する）を再発させる。
+is_active_src=$(sed -n '/^is_active() {/,/^}/p' "$D/watch.sh")
+if [ -z "$is_active_src" ]; then
+  bad 'watch.sh から is_active() を抽出できない（関数定義が変わった？ selftest も追随させる）'
+else
+  (
+    eval "$is_active_src"
+    r=0
+    is_active '✻ Cooking… (3m 21s · ↓ 4.2k tokens)'                       || r=1
+    is_active 'Waiting for 2 background agent to finish'                  || r=1
+    is_active 'esc to interrupt'                                          || r=1
+    is_active 'ctrl+b to run in background'                               || r=1
+    is_active 'watch: 司令官が gh pr checks で外側の状態を確認し、待っている' && r=1
+    exit $r
+  )
+  if [ $? = 0 ]; then
+    ok 'watch.sh の is_active() は稼働中パターンと本物の「待ち」を正しく区別する'
+  else
+    bad 'watch.sh の is_active() の判定が退行している（事故2 の再発防止ロジック）'
+  fi
+fi
+
+# 6o) 重大2(watch) の退行検査: 同じ画面のまま止まっている部下を 2 回連続で報告しないか
+#     （事故2: 既に処理済みの古い状態を同じ部下について何度も通知し続け、司令官が
+#     「通知はどうせ空振り」と学習して事故1 の読み飛ばしに直結した）。
+#     watch.sh 本体（sleep 20 を含む while ループ）を丸ごとは動かさず、実装から
+#     「1 回観測 → 20 秒後にもう 1 回 → 既読(STALL_STATE)と突き合わせて報告」の
+#     ブロックをそのまま抽出して検証する（sleep はテスト用に無効化する）。
+g5="$SANDBOX/g5"; mkdir -p "$g5/bin"
+mission5="$g5/mission"; mkdir -p "$mission5/workers/42"
+jq -nc '{no:"42",name:"g5",ws_ref:"workspace:99",ws_id:""}' > "$mission5/roster.jsonl"
+screen_file="$g5/screen.txt"
+cat > "$g5/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+if [ "$1" = "read-screen" ]; then cat "$SCREEN_TEXT_FILE" 2>/dev/null; fi
+exit 0
+CMUXSTUB
+chmod +x "$g5/bin/cmux"
+stall_state="$mission5/watch.stall.state"; : > "$stall_state"
+scan_waiting_src=$(sed -n '/^scan_waiting() {/,/^}/p' "$D/watch.sh")
+dedup_src=$(sed -n '/^  first="\$(scan_waiting)"$/,/^  fi$/p' "$D/watch.sh")
+if [ -z "$scan_waiting_src" ] || [ -z "$dedup_src" ]; then
+  bad 'watch.sh から scan_waiting() / 既読つき停止検知ブロックを抽出できない（実装が変わった？ selftest も追随させる）'
+else
+  run5() {
+    (
+      MISSION="$mission5" ROSTER="$mission5/roster.jsonl" STALL_STATE="$stall_state"
+      SCREEN_TEXT_FILE="$screen_file"
+      export MISSION ROSTER STALL_STATE SCREEN_TEXT_FILE PATH="$g5/bin:$PATH"
+      eval "$is_active_src"
+      eval "$scan_waiting_src"
+      sleep() { :; }  # 20 秒待たせない
+      eval "$dedup_src"
+    )
+  }
+  printf '待ち画面その1（待っています）\n' > "$screen_file"
+  out5a=$(run5)
+  out5b=$(run5)  # 同じ画面のまま2回目 → 既読のはずなので再報告しないこと
+  printf '待ち画面その2（内容が変わった。待っています）\n' > "$screen_file"
+  out5c=$(run5)  # 画面が変わった → 新規の停止として報告すること
+  if printf '%s' "$out5a" | grep -q '42' \
+     && ! printf '%s' "$out5b" | grep -q '42' \
+     && printf '%s' "$out5c" | grep -q '42'; then
+    ok 'watch.sh の停止検知は同じ画面を再報告せず、画面が変われば新規として報告する'
+  else
+    bad '重大2(watch) の退行: 同じ停止を繰り返し報告する、または画面が変わっても報告されない'
+    printf '      1回目: %s\n' "$out5a" | head -3
+    printf '      2回目(同じ画面): %s\n' "$out5b" | head -3
+    printf '      3回目(画面変化): %s\n' "$out5c" | head -3
+  fi
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
