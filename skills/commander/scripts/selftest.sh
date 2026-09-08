@@ -275,6 +275,11 @@ fi
 # 6n) 実機テスト: watch.sh の is_active() が「稼働中」の画面を正しく「稼働中」と判定するか。
 #     ここを誤って「待ち」と判定すると、正当にブロック中の部下を毎ポーリング停止扱いにして
 #     事故2（同じ部下について繰り返し誤検知する）を再発させる。
+#     `Running 1 shell command · 35s…` は実際に踏んだケース: 部下が
+#     `gh pr checks 564 --watch --interval 30` をフォアグラウンドで実行中で正しく
+#     ブロックしていたにもかかわらず、時間が先頭に来ない画面形式のため既存の時間パターン・
+#     spinner パターンのどちらにも一致せず「止まっている」と誤報し、司令官が健全な部下に
+#     割り込むきっかけになった。
 is_active_src=$(sed -n '/^is_active() {/,/^}/p' "$D/watch.sh")
 if [ -z "$is_active_src" ]; then
   bad 'watch.sh から is_active() を抽出できない（関数定義が変わった？ selftest も追随させる）'
@@ -286,13 +291,14 @@ else
     is_active 'Waiting for 2 background agent to finish'                  || r=1
     is_active 'esc to interrupt'                                          || r=1
     is_active 'ctrl+b to run in background'                               || r=1
+    is_active 'Running 1 shell command · 35s…'                            || r=1
     is_active 'watch: 司令官が gh pr checks で外側の状態を確認し、待っている' && r=1
     exit $r
   )
   if [ $? = 0 ]; then
-    ok 'watch.sh の is_active() は稼働中パターンと本物の「待ち」を正しく区別する'
+    ok 'watch.sh の is_active() は稼働中パターンと本物の「待ち」を正しく区別する（フォアグラウンドのシェル実行含む）'
   else
-    bad 'watch.sh の is_active() の判定が退行している（事故2 の再発防止ロジック）'
+    bad 'watch.sh の is_active() の判定が退行している（事故2 / フォアグラウンド実行の誤検知の再発防止ロジック）'
   fi
 fi
 

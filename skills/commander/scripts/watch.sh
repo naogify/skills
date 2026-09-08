@@ -32,6 +32,12 @@ is_active() {
     *"ctrl+b to run in background"*)      return 0 ;;
     *"Waiting for "*"background agent"*)  return 0 ;;
     *"tokens)"*)                          return 0 ;;
+    # `gh pr checks --watch` 等、フォアグラウンドでシェルコマンドを実行中の画面。
+    # cmux は「(3m 21s · ...)」のように時間が先頭に来ない形（例:
+    # "Running 1 shell command · 35s…"）でも進捗を出すことがあり、下の時間
+    # パターンにも spinner 文字にも一致しない。実際にこれを「待ち」と誤判定し、
+    # 正しくブロックしている健全な部下に司令官が割り込むきっかけになった。
+    *"Running "*"shell command"*)         return 0 ;;
   esac
   printf '%s' "$1" | grep -qE '\([0-9]+m? ?[0-9]*s · ' && return 0
   printf '%s' "$1" | grep -qE '^[[:space:]]*[✻✳✢✽◑◯⏺][[:space:]]' && return 0
