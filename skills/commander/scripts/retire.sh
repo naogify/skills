@@ -20,7 +20,24 @@ ref=$(printf  '%s' "$row" | jq -r '.ws_ref')
 wt=$(printf   '%s' "$row" | jq -r '.worktree // ""')
 repo=$(printf '%s' "$row" | jq -r '.repo // ""')
 base=$(printf '%s' "$row" | jq -r '.base // ""')
+cwd=$(printf  '%s' "$row" | jq -r '.cwd // ""')
 WDIR="$MISSION/workers/$NO"
+
+# ── `worktree` が空でも、cwd 自体が worktree なら削除対象として拾う ──
+# 読み取り専用タスクの部下を `spawn.sh ... "$CWD" "" "" ""`（worktree 引数を空）で
+# 起動すると roster.jsonl の worktree は空になるが、実際には cwd が worktree ということが
+# ある。`wt` が空だからと丸ごとスキップすると、「撤収完了」と表示したまま worktree が
+# 残り続ける（実際に起きた。司令官が手で消す羽目になった）。
+# メインの作業ツリーかどうかは `git rev-parse --git-dir` と `--git-common-dir` が
+# 一致するかで判定できる（一致すればメイン、異なれば worktree 側のリンク）。
+if { [ -z "$wt" ] || [ ! -d "$wt" ]; } && [ -n "$cwd" ] && [ -d "$cwd" ]; then
+  gd=$(git -C "$cwd" rev-parse --git-dir 2>/dev/null)
+  gcd=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
+  if [ -n "$gd" ] && [ -n "$gcd" ] && [ "$gd" != "$gcd" ]; then
+    wt="$cwd"
+    printf 'note: roster の worktree が空だったが cwd 自体が worktree だったので削除対象にする: %s\n' "$wt" >&2
+  fi
+fi
 
 # ── `repo` フィールドの解釈 ──
 # `spawn.sh` の usage 上は「gh --repo に渡す slug（owner/name）」の意味で、roster.jsonl の

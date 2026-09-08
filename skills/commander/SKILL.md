@@ -313,6 +313,11 @@ exec claude --model sonnet --dangerously-skip-permissions \
 bash $SKILL/scripts/spawn.sh "$MISSION" <no> "<部下名>" "<説明>" "<cwd>" [worktreeパス] [repo] [base]
 ```
 
+`[repo]` は **GitHub の slug（`owner/name`。`gh --repo` に渡す形）** で渡す。ローカルパスではない。
+`retire.sh` は worktree から `git` で機械的にリポジトリのルートを導出するので、ここに渡した文字列を
+パスとして使うことはない（過去に `repo` をパスとして扱っていたコードが slug を渡されて fatal で
+落ち、ワークスペースだけ閉じて worktree が残る事故が起きた。今は直っている）。
+
 `$MISSION/group.ref` があれば**自動でミッションのグループに入る**（`--group ... --group-placement end`）。
 グループが消えていた場合は警告を出して単独で起動する（起動そのものは止めない）。
 
@@ -699,7 +704,13 @@ bash $SKILL/scripts/board.sh "$MISSION"
 - `inbox.sh`（動きがあったとき）と `scripts/sweep.sh`（ターンの最初と最後、Phase 5 参照）が
   `completed.log` と `reported.log` を突き合わせ、
   **「★人間へ未報告の完了」を出力の先頭に突き付ける**
-- 人間に報告したら `reported.log` に追記して消す
+- 人間に報告したら `bash $SKILL/scripts/reported.sh "$MISSION" <no>` を実行して記録する
+
+**`reported.log` は手で編集しない。** `inbox.sh` は `reported.log` を
+「**タブ区切り・第 2 フィールド = 部下番号**」という形式で読み、`completed.log` と突き合わせる。
+半角スペース区切りで手書きすると第 2 フィールドが一致せず、**同じ完了が何度も
+「★人間へ未報告の完了」として再提示され続ける**（実際に起きた）。
+必ず `reported.sh` 経由で追記する（形式を機械的に揃える）。
 
 意志ではなく**差分**で管理するので、忘れても次の `inbox.sh` / `sweep.sh` で必ず目に入る。
 
@@ -1061,6 +1072,7 @@ Phase 5「完了通知の本文は空っぽ」を参照。
 | **`origin/<base>..HEAD` で未 push 判定** | **squash マージ後に誤検知**（squash では元 commit が base の祖先にならない）して撤収できなかった | `@{u}`（upstream）と比較する |
 | **lint が自分自身を検査** | `selftest.sh` が自分の検査文字列に反応して**存在しない退行を報告**した | 検査対象から自分を除く |
 | **部下番号をそのまま PR 番号として使う** | `inbox.sh` の片付け漏れ検知が部下番号を PR 番号と誤認識し、**無関係な既存 PR に衝突して「マージ済み」と誤報**した（部下8 → 別件でマージ済みの PR #8）。誤報に従うと作業中の部下を撤収して worktree ごと成果を破棄しかねない | PR 番号は `workers/<no>/PR.md` の実物から読む（PR.md が無い部下は判定対象外） |
+| **`reported.log` を手書き** | 半角スペース区切りで追記したところ `inbox.sh` の第2フィールド（タブ区切り前提）が一致せず、**同じ完了が何度も「未報告」として再提示され続けた** | 手で編集せず `bash $SKILL/scripts/reported.sh "$MISSION" <no>` で追記する |
 
 **共通の教訓**: 「日本語が入る」「macOS の BSD ツール」「JSON の型」の 3 つで壊れる。
 書いたら**実際に壊れたデータを食わせて、期待どおり落ちるかを確かめる**（通ることの確認だけでは検品にならない）。

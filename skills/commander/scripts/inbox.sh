@@ -79,7 +79,7 @@ if [ "$LEDGER" != "--no-ledger" ] && [ -s "$MISSION/completed.log" ]; then
     "${MISSION}/reported.log" "$MISSION/completed.log" 2>/dev/null \
     || cat "$MISSION/completed.log")
   if [ -n "$unrep" ]; then
-    out="${out}★人間へ未報告の完了（報告したら reported.log に追記する）"$'\n'
+    out="${out}★人間へ未報告の完了（報告したら reported.sh で記録する）"$'\n'
     while IFS=$'\t' read -r at no nm dg; do
       [ -n "$no" ] && out="${out}  ✔ 部下${no} ${nm}（${at}）"$'\n'
       [ -n "${dg:-}" ] && out="${out}      成果物: ${dg}"$'\n'

@@ -76,7 +76,7 @@ if [ -s "$MISSION/completed.log" ]; then
     "${MISSION}/reported.log" "$MISSION/completed.log" 2>/dev/null \
     || cat "$MISSION/completed.log")
   if [ -n "$unrep" ]; then
-    printf -- '--- ★人間へ未報告の完了（報告したら reported.log に追記する） ---\n'
+    printf -- '--- ★人間へ未報告の完了（報告したら reported.sh で記録する） ---\n'
     printf '%s\n' "$unrep" | sed 's/^/  /'
     pending=1
   fi

@@ -287,6 +287,11 @@ fi
 # 6n) 実機テスト: watch.sh の is_active() が「稼働中」の画面を正しく「稼働中」と判定するか。
 #     ここを誤って「待ち」と判定すると、正当にブロック中の部下を毎ポーリング停止扱いにして
 #     事故2（同じ部下について繰り返し誤検知する）を再発させる。
+#     `Running 1 shell command · 35s…` は実際に踏んだケース: 部下が
+#     `gh pr checks 564 --watch --interval 30` をフォアグラウンドで実行中で正しく
+#     ブロックしていたにもかかわらず、時間が先頭に来ない画面形式のため既存の時間パターン・
+#     spinner パターンのどちらにも一致せず「止まっている」と誤報し、司令官が健全な部下に
+#     割り込むきっかけになった。
 is_active_src=$(sed -n '/^is_active() {/,/^}/p' "$D/watch.sh")
 if [ -z "$is_active_src" ]; then
   bad 'watch.sh から is_active() を抽出できない（関数定義が変わった？ selftest も追随させる）'
@@ -298,13 +303,14 @@ else
     is_active 'Waiting for 2 background agent to finish'                  || r=1
     is_active 'esc to interrupt'                                          || r=1
     is_active 'ctrl+b to run in background'                               || r=1
+    is_active 'Running 1 shell command · 35s…'                            || r=1
     is_active 'watch: 司令官が gh pr checks で外側の状態を確認し、待っている' && r=1
     exit $r
   )
   if [ $? = 0 ]; then
-    ok 'watch.sh の is_active() は稼働中パターンと本物の「待ち」を正しく区別する'
+    ok 'watch.sh の is_active() は稼働中パターンと本物の「待ち」を正しく区別する（フォアグラウンドのシェル実行含む）'
   else
-    bad 'watch.sh の is_active() の判定が退行している（事故2 の再発防止ロジック）'
+    bad 'watch.sh の is_active() の判定が退行している（事故2 / フォアグラウンド実行の誤検知の再発防止ロジック）'
   fi
 fi
 
@@ -356,6 +362,51 @@ else
     printf '      2回目(同じ画面): %s\n' "$out5b" | head -3
     printf '      3回目(画面変化): %s\n' "$out5c" | head -3
   fi
+fi
+
+# 6p) バグB の退行検査: roster.worktree が空でも、cwd 自体が worktree なら削除されるか。
+#     読み取り専用タスクの部下を spawn.sh に worktree 引数を空で渡して起動すると roster の
+#     worktree は空だが、実際には cwd が worktree ということがある。wt が空だからと丸ごと
+#     スキップすると「撤収完了」と表示したまま worktree が残り続ける（実際に起きた。
+#     司令官が手で消す羽目になった）。
+g6="$SANDBOX/g6"; mkdir -p "$g6"
+repo="$g6/repo"; wt="$g6/wt"; mission="$g6/mission"
+git init -q "$repo" \
+  && git -C "$repo" config user.email t@t.example \
+  && git -C "$repo" config user.name t \
+  && git -C "$repo" commit -q --allow-empty -m init \
+  && git -C "$repo" worktree add -q "$wt" -b g6-branch >/dev/null 2>&1
+mkdir -p "$mission/workers/1"
+printf '## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/REPORT.md"
+jq -nc --arg cwd "$wt" \
+  '{no:"1",name:"g6",ws_ref:"",ws_id:"",worktree:"",repo:"",base:"main",cwd:$cwd}' \
+  > "$mission/roster.jsonl"
+bash "$D/retire.sh" "$mission" 1 >"$g6/out.log" 2>&1
+if [ ! -d "$wt" ] && [ -f "$mission/workers/1/RETIRED" ]; then
+  ok 'バグB 退行検査: roster.worktree が空でも cwd 自体が worktree なら削除して RETIRED を書く'
+else
+  bad 'バグB の退行: roster.worktree が空だと cwd が worktree でも削除されない（無言の worktree リーク）'
+  sed 's/^/      /' "$g6/out.log" | head -6
+fi
+
+# 6q) バグC の退行検査: reported.sh で記録した完了は inbox.sh の
+#     「★人間へ未報告の完了」に二度と出ないか（reported.log の形式をタブ区切り・
+#     第2フィールド=部下番号に機械的に揃える。手書きで半角スペース区切りにすると
+#     第2フィールドが一致せず、同じ完了が何度も再提示され続けた実害がある）。
+g7="$SANDBOX/g7"; mkdir -p "$g7/workers/1"
+mission="$g7"
+jq -nc '{no:"1",name:"g7",ws_ref:"",ws_id:""}' > "$mission/roster.jsonl"
+printf '%s\t1\tg7\tテスト完了\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$mission/completed.log"
+before=$(bash "$D/inbox.sh" "$mission" --peek 2>&1)
+bash "$D/reported.sh" "$mission" 1 g7 >/dev/null 2>&1
+after=$(bash "$D/inbox.sh" "$mission" --peek 2>&1)
+if printf '%s' "$before" | grep -q '★人間へ未報告の完了' \
+   && ! printf '%s' "$after" | grep -q '★人間へ未報告の完了'; then
+  ok 'バグC 退行検査: reported.sh で記録した完了は「未報告」に二度と出ない（reported.log の形式）'
+else
+  bad 'バグC の退行: reported.sh で記録しても「未報告」が消えない（reported.log の形式が inbox.sh と食い違っている）'
+  printf '      記録前: %s\n' "$before" | head -3
+  printf '      記録後: %s\n' "$after" | head -3
 fi
 
 # 7) 全スクリプトの構文
