@@ -346,6 +346,31 @@ else
   fi
 fi
 
+# 6p) バグB の退行検査: roster.worktree が空でも、cwd 自体が worktree なら削除されるか。
+#     読み取り専用タスクの部下を spawn.sh に worktree 引数を空で渡して起動すると roster の
+#     worktree は空だが、実際には cwd が worktree ということがある。wt が空だからと丸ごと
+#     スキップすると「撤収完了」と表示したまま worktree が残り続ける（実際に起きた。
+#     司令官が手で消す羽目になった）。
+g6="$SANDBOX/g6"; mkdir -p "$g6"
+repo="$g6/repo"; wt="$g6/wt"; mission="$g6/mission"
+git init -q "$repo" \
+  && git -C "$repo" config user.email t@t.example \
+  && git -C "$repo" config user.name t \
+  && git -C "$repo" commit -q --allow-empty -m init \
+  && git -C "$repo" worktree add -q "$wt" -b g6-branch >/dev/null 2>&1
+mkdir -p "$mission/workers/1"
+printf '## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/REPORT.md"
+jq -nc --arg cwd "$wt" \
+  '{no:"1",name:"g6",ws_ref:"",ws_id:"",worktree:"",repo:"",base:"main",cwd:$cwd}' \
+  > "$mission/roster.jsonl"
+bash "$D/retire.sh" "$mission" 1 >"$g6/out.log" 2>&1
+if [ ! -d "$wt" ] && [ -f "$mission/workers/1/RETIRED" ]; then
+  ok 'バグB 退行検査: roster.worktree が空でも cwd 自体が worktree なら削除して RETIRED を書く'
+else
+  bad 'バグB の退行: roster.worktree が空だと cwd が worktree でも削除されない（無言の worktree リーク）'
+  sed 's/^/      /' "$g6/out.log" | head -6
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
