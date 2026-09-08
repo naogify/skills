@@ -377,6 +377,26 @@ else
   sed 's/^/      /' "$g6/out.log" | head -6
 fi
 
+# 6q) バグC の退行検査: reported.sh で記録した完了は inbox.sh の
+#     「★人間へ未報告の完了」に二度と出ないか（reported.log の形式をタブ区切り・
+#     第2フィールド=部下番号に機械的に揃える。手書きで半角スペース区切りにすると
+#     第2フィールドが一致せず、同じ完了が何度も再提示され続けた実害がある）。
+g7="$SANDBOX/g7"; mkdir -p "$g7/workers/1"
+mission="$g7"
+jq -nc '{no:"1",name:"g7",ws_ref:"",ws_id:""}' > "$mission/roster.jsonl"
+printf '%s\t1\tg7\tテスト完了\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$mission/completed.log"
+before=$(bash "$D/inbox.sh" "$mission" --peek 2>&1)
+bash "$D/reported.sh" "$mission" 1 g7 >/dev/null 2>&1
+after=$(bash "$D/inbox.sh" "$mission" --peek 2>&1)
+if printf '%s' "$before" | grep -q '★人間へ未報告の完了' \
+   && ! printf '%s' "$after" | grep -q '★人間へ未報告の完了'; then
+  ok 'バグC 退行検査: reported.sh で記録した完了は「未報告」に二度と出ない（reported.log の形式）'
+else
+  bad 'バグC の退行: reported.sh で記録しても「未報告」が消えない（reported.log の形式が inbox.sh と食い違っている）'
+  printf '      記録前: %s\n' "$before" | head -3
+  printf '      記録後: %s\n' "$after" | head -3
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
