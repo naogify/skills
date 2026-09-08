@@ -313,6 +313,11 @@ exec claude --model sonnet --dangerously-skip-permissions \
 bash $SKILL/scripts/spawn.sh "$MISSION" <no> "<部下名>" "<説明>" "<cwd>" [worktreeパス] [repo] [base]
 ```
 
+`[repo]` は **GitHub の slug（`owner/name`。`gh --repo` に渡す形）** で渡す。ローカルパスではない。
+`retire.sh` は worktree から `git` で機械的にリポジトリのルートを導出するので、ここに渡した文字列を
+パスとして使うことはない（過去に `repo` をパスとして扱っていたコードが slug を渡されて fatal で
+落ち、ワークスペースだけ閉じて worktree が残る事故が起きた。今は直っている）。
+
 `$MISSION/group.ref` があれば**自動でミッションのグループに入る**（`--group ... --group-placement end`）。
 グループが消えていた場合は警告を出して単独で起動する（起動そのものは止めない）。
 
