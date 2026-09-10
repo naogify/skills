@@ -33,4 +33,4 @@ Claude Code の個人用スキルを配布するための marketplace。
 
 - **private リポジトリ**です。社内固有の運用（リポジトリのブランチ規約、顧客名、org ruleset の挙動）が
   スキル本文に含まれるため、public にしないこと。
-- `commander` は `cmux`（https://cmux.com）が必要です。macOS 専用。
+- `commander` は `cmux`（https://cmux.com） が必要です。macOS 専用。
