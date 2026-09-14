@@ -30,10 +30,38 @@ WDIR="$MISSION/workers/$NO"
 # 残り続ける（実際に起きた。司令官が手で消す羽目になった）。
 # メインの作業ツリーかどうかは `git rev-parse --git-dir` と `--git-common-dir` が
 # 一致するかで判定できる（一致すればメイン、異なれば worktree 側のリンク）。
+#
+# 【注意】`--git-dir` と `--git-common-dir` は素の（--path-format を付けない）呼び出しだと
+# 出力の形式が食い違うことがある。`--git-dir` は絶対パス、`--git-common-dir` はリポジトリの
+# ルートからの相対パス（例: `../../.git`）で返ってくる場合があり、同じ場所を指していても
+# 文字列としては一致しない。この結果、git リポジトリの「サブディレクトリ」（worktree でも
+# 何でもない、メイン作業ツリーの奥のディレクトリ）を worktree と誤判定し、無関係な
+# メインリポジトリの `git status` を丸ごと「未 commit の変更」として拾ってしまう事故が
+# 実際に起きた（部下が `~/.claude` 配下の git リポジトリのサブディレクトリで動いていたケース）。
+# これは `~/.claude` に限らず、git リポジトリのサブディレクトリで実行すれば常に起こりうる。
+# 対策は二段構え:
+#   1. `--path-format=absolute` で両方を絶対パス・正規化済みに揃えてから比較する
+#      （古い git で `--path-format` が使えない場合は、相対パスを `cd` + `pwd -P` で
+#      実体パスに解決してフォールバックする）。
+#   2. さらに `git rev-parse --show-toplevel` が cwd 自身（の実体パス）と一致する場合のみ
+#      worktree とみなす。worktree のルートは必ずそのディレクトリ自身が toplevel になる。
+#      サブディレクトリなら親が toplevel になるので、1 の正規化だけをすり抜けるケースが
+#      あっても、ここでもう一段防げる（symlink を含むパスで git-dir 側と cwd 側の表記が
+#      食い違う場合があるため、cwd 側も `pwd -P` で実体パスに解決してから比較する）。
 if { [ -z "$wt" ] || [ ! -d "$wt" ]; } && [ -n "$cwd" ] && [ -d "$cwd" ]; then
-  gd=$(git -C "$cwd" rev-parse --git-dir 2>/dev/null)
-  gcd=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
-  if [ -n "$gd" ] && [ -n "$gcd" ] && [ "$gd" != "$gcd" ]; then
+  gd=$(git -C "$cwd" rev-parse --path-format=absolute --git-dir 2>/dev/null)
+  gcd=$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  if [ -z "$gd" ] && [ -z "$gcd" ]; then
+    # --path-format 未対応の古い git 用フォールバック
+    gd_raw=$(git -C "$cwd" rev-parse --git-dir 2>/dev/null)
+    gcd_raw=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)
+    [ -n "$gd_raw" ]  && gd=$(cd "$cwd/$gd_raw" 2>/dev/null && pwd -P)
+    [ -n "$gcd_raw" ] && gcd=$(cd "$cwd/$gcd_raw" 2>/dev/null && pwd -P)
+  fi
+  cwd_real=$(cd "$cwd" 2>/dev/null && pwd -P)
+  toplevel=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$gd" ] && [ -n "$gcd" ] && [ "$gd" != "$gcd" ] \
+     && [ -n "$toplevel" ] && [ -n "$cwd_real" ] && [ "$toplevel" = "$cwd_real" ]; then
     wt="$cwd"
     printf 'note: roster の worktree が空だったが cwd 自体が worktree だったので削除対象にする: %s\n' "$wt" >&2
   fi
