@@ -75,6 +75,21 @@ gh api graphql -f query='
 `scgp-app` と `scgp-api` は**対の PR で開発される**。app 側だけマージすると機能が成立しない。
 CI もレビュー bot も検出しないので、api の main を `git grep` して確認する。
 
+## 6. base（分岐元ブランチ）より遅れていないか
+
+`mergeStateStatus=CLEAN` は「textual にコンフリクトしない」ことしか保証しない。
+古い base から切ったブランチが、base 側で先にマージされた**別の PR** の変更を、
+コンフリクトにならないまま巻き戻すことがある（実例: 11分前にマージされた PR の変更を、
+古い main から切った別の PR のマージが巻き戻した。両方とも `mergeStateStatus=CLEAN` のまま
+マージできており、CI・approve・未解決スレッドの確認だけでは検出できなかった）。
+
+```bash
+gh api "repos/$REPO/compare/<base>...<headRefOid>" --jq '.behind_by'
+```
+
+`behind_by` が 0 でなければ、head を最新の base に合わせてから（rebase か base のマージ）
+再検収する。`scripts/mergeable.sh` はこれを自動でチェックする。
+
 ## 判定
 
 どれか 1 つでも赤・空なら **GO を出さず部下に差し戻す**（`mergeable.sh` の exit 1 と同じ）。

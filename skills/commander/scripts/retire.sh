@@ -68,17 +68,31 @@ fi
 
 if [ "$FORCE" != "--force" ]; then
   if [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
-    # 報告が無くても、担当 PR が既にマージ / クローズされていれば完了と見なす
-    # （司令官が部下を飛ばしてマージした場合、REPORT は書かれない）。
-    prnum=$(printf '%s' "$NO" | sed 's/^f//')
+    # 報告（REPORT/PLAN）が無くても、PR.md に書かれた実物の PR が既にマージ / クローズ
+    # されていれば完了と見なす（司令官が部下を飛ばしてマージした場合や、部下が PR.md だけ
+    # 書いて止まった場合に REPORT.md は無い）。
+    #
+    # PR 番号は部下番号 ($NO) からではなく、必ず PR.md の実物から読む。
+    # 部下番号をそのまま PR 番号として使うと、無関係な既存 PR に衝突して「マージ済み」と
+    # 誤判定しうる（inbox.sh の片付け漏れ検知で一度踏んだのと同じ罠。SKILL.md の
+    # 「スクリプトを書き換えるときの規則」に載っている教訓だが、retire.sh には未反映だった。
+    # 実例: 部下43・44 が PR.md を書き、対応する PR（#29・#30）はマージ済みだったのに、
+    # この判定が効かず REPORT.md も PLAN.md も無いという理由だけで撤収を拒否し、
+    # 「作業を捨ててよい」ときのフラグである --force を使わざるを得なかった）。
+    prnum=""
+    prf="$WDIR/PR.md"
+    if [ -s "$prf" ]; then
+      prnum=$(LC_ALL=C grep -aoE 'pull/[0-9]+' "$prf" 2>/dev/null | head -1 | sed 's|pull/||')
+      [ -n "$prnum" ] || prnum=$(LC_ALL=C grep -aoE '#[0-9]+' "$prf" 2>/dev/null | head -1 | tr -d '#')
+    fi
     prstate=""
     case "$prnum" in
       ''|*[!0-9]*) : ;;
       *) [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
     esac
     case "$prstate" in
-      MERGED|CLOSED) printf '報告は無いが PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
-      *) hold "REPORT.md も PLAN.md も無く、PR も未マージ（まだ終わっていない）: $WDIR" ;;
+      MERGED|CLOSED) printf 'REPORT.md は無いが PR.md に書かれた PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
+      *) hold "REPORT.md も PLAN.md も無く、PR.md の PR も未マージ（まだ終わっていない）: $WDIR" ;;
     esac
   fi
   [ -s "$WDIR/QUESTION.md" ] && hold "QUESTION.md が残っている（未回答）: $WDIR/QUESTION.md"

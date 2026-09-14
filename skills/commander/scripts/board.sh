@@ -12,6 +12,27 @@ MISSION=$1
 ROSTER="$MISSION/roster.jsonl"
 [ -s "$ROSTER" ] || die "部下がいない: $ROSTER"
 
+# QUESTION.md / BLOCKED.md を「放置されている」とみなす経過分数。
+# 実際に QUESTION.md が 4 日間気づかれなかった事故があるので、既定は短めの 30 分にする
+# （sweep.sh と揃える。COMMANDER_STALE_MIN で上書きできる）。
+STALE_MIN=${COMMANDER_STALE_MIN:-30}
+
+stale_suffix() { # $1=ファイルパス。放置分数がしきい値以上なら警告文字列を返す
+  p="$1"
+  mt_epoch=$(stat -f '%m' "$p" 2>/dev/null || stat -c '%Y' "$p" 2>/dev/null)
+  [ -n "${mt_epoch:-}" ] || return 0
+  mins=$(( ( $(date -u +%s) - mt_epoch ) / 60 ))
+  if [ "$mins" -ge "$STALE_MIN" ] 2>/dev/null; then
+    printf ' ⚠ %s分放置（%s分以上は警告）' "$mins" "$STALE_MIN"
+  fi
+}
+
+# 人間から「今どうなってる？」と聞かれたときに、まずここだけ読めば済むようにする banner。
+# 実際の事故: 部下が REPORT.md / QUESTION.md を書いていたのに、司令官はワークスペース一覧と
+# 報告ファイルの有無しか見ておらず、QUESTION.md の中身（4日放置）に気付かなかった。
+# per-worker の詳細に埋もれさせず、先頭にまとめて突き付ける。
+must_see=""
+
 bar() { # $1=0.0-1.0  $2=幅
   awk -v p="${1:-0}" -v w="${2:-24}" 'BEGIN{
     if (p=="" || p=="none") p=0; p=p+0;
@@ -76,10 +97,26 @@ while IFS= read -r row; do
 
   # 状態: 報告ファイルが最も強い根拠。無ければ cmux の lane を見る
   lane=$(cmux workspace status --json --workspace "$ref" 2>/dev/null | jq -r '.effective // "unknown"')
-  if   [ -s "$WDIR/BLOCKED.md" ];  then state="⛔ 行き詰まり（人間の判断待ち）"; n_attn=$((n_attn+1))
-  elif [ -s "$WDIR/QUESTION.md" ]; then state="❓ 確認待ち（司令官の回答待ち）"; n_attn=$((n_attn+1))
+  if   [ -s "$WDIR/BLOCKED.md" ];  then
+    state="⛔ 行き詰まり（人間の判断待ち）$(stale_suffix "$WDIR/BLOCKED.md")"; n_attn=$((n_attn+1))
+    bmt=$(stat -f '%m' "$WDIR/BLOCKED.md" 2>/dev/null || stat -c '%Y' "$WDIR/BLOCKED.md" 2>/dev/null)
+    if [ -n "${bmt:-}" ]; then
+      bmins=$(( ( $(date -u +%s) - bmt ) / 60 ))
+      [ "$bmins" -ge "$STALE_MIN" ] 2>/dev/null \
+        && must_see="${must_see}  ⛔ 部下${no} ${name}: BLOCKED.md が ${bmins}分 人間の判断待ちのまま"$'\n'
+    fi
+  elif [ -s "$WDIR/QUESTION.md" ]; then
+    state="❓ 確認待ち（司令官の回答待ち）$(stale_suffix "$WDIR/QUESTION.md")"; n_attn=$((n_attn+1))
+    qmt=$(stat -f '%m' "$WDIR/QUESTION.md" 2>/dev/null || stat -c '%Y' "$WDIR/QUESTION.md" 2>/dev/null)
+    if [ -n "${qmt:-}" ]; then
+      qmins=$(( ( $(date -u +%s) - qmt ) / 60 ))
+      [ "$qmins" -ge "$STALE_MIN" ] 2>/dev/null \
+        && must_see="${must_see}  ❓ 部下${no} ${name}: QUESTION.md が ${qmins}分 未回答のまま"$'\n'
+    fi
   elif [ -s "$WDIR/PLAN.md" ];     then state="📋 編成案あり（承認待ち）";      n_done=$((n_done+1))
-  elif [ -s "$WDIR/REPORT.md" ];   then state="✅ 報告あり（検収待ち）";        n_done=$((n_done+1))
+  elif [ -s "$WDIR/REPORT.md" ];   then
+    state="✅ 報告あり（検収待ち）";        n_done=$((n_done+1))
+    must_see="${must_see}  ★ 部下${no} ${name}: REPORT.md あり。検収・撤収がまだ"$'\n'
   elif [ -s "$WDIR/PR.md" ];       then state="👀 レビュー対応中"
   else
     case "$lane" in
@@ -114,6 +151,7 @@ while IFS= read -r row; do
       warn=""
       if [ "$mins" -ge 45 ] && [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
         warn="   ← 45分以上 報告なし。画面を見る"
+        must_see="${must_see}  ⚠ 部下${no} ${name}: 稼働中で ${mins}分 報告なし（画面を見る）"$'\n'
       fi
       lines="${lines}     経過 ${mins}分${warn}"$'\n'
     fi
@@ -134,6 +172,11 @@ fi
 printf '━━━ 作業状況 ━━━ %s\n' "${gname:-$(basename "$MISSION")}"
 printf '  全体 %s   （稼働 %d / 撤収 %d / 全 %d）\n' "$(bar "$overall" 28)" "$n_active" "$n_retired" "$n_total"
 printf '  判断待ち %d 件 ・ 検収待ち %d 件\n' "$n_attn" "$n_done"
+if [ -n "$must_see" ]; then
+  printf '───────────────────────────────────────────────────────────\n'
+  printf '  ★ 今すぐ見るべきもの ★\n'
+  printf '%s' "$must_see"
+fi
 printf '───────────────────────────────────────────────────────────\n'
 printf '%s' "$lines"
 printf '───────────────────────────────────────────────────────────\n'

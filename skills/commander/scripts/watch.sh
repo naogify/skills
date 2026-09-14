@@ -14,9 +14,27 @@ MISSION=$1; MAX=${2:-3600}; IV=${3:-60}
 [ -d "$MISSION" ] || die "mission ディレクトリが無い: $MISSION"
 ROSTER="$MISSION/roster.jsonl"
 [ -s "$ROSTER" ] || die "部下がいない: $ROSTER"
-INBOX="$(cd "$(dirname "$0")" && pwd)/inbox.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+INBOX="$HERE/inbox.sh"
+SELF="$HERE/watch.sh"
 STALL_STATE="$MISSION/watch.stall.state"
-touch "$STALL_STATE" 2>/dev/null || true
+SILENCE_STATE="$MISSION/watch.silence.state"
+touch "$STALL_STATE" "$SILENCE_STATE" 2>/dev/null || true
+
+# 監視を終えるたびに、張り直すための正確なコマンドを最後の行に出す。
+# 「手順書に『張り直せ』と書くだけ」では、司令官が別件に気を取られている間に
+# 再武装を忘れる（実際に部下44の報告を拾った後、45・46・47 用に張り直しておらず、
+# 45・46 の REPORT.md に気付かないまま人間に指摘されて初めて発覚した）。
+# コピペするだけで再武装できる正確な文字列をここで固定し、記憶に頼らせない。
+rearm_line() { printf 'REARM: bash "%s" "%s" %s %s\n' "$SELF" "$MISSION" "$MAX" "$IV"; }
+
+# 沈黙検知のバケット台帳（$SILENCE_STATE）の読み書き。「部下<TAB>最後に報告した60分区切り」を持つ。
+get_silence_bucket() { awk -F'\t' -v no="$1" '$1==no{print $2; exit}' "$SILENCE_STATE" 2>/dev/null; }
+put_silence_bucket() {
+  tmp=$(mktemp "${TMPDIR:-/tmp}/watch-silence.XXXXXX") || return 1
+  { [ -s "$SILENCE_STATE" ] && awk -F'\t' -v no="$1" '$1!=no' "$SILENCE_STATE"; printf '%s\t%s\n' "$1" "$2"; } > "$tmp"
+  mv "$tmp" "$SILENCE_STATE"
+}
 
 # 画面が「動いている」と判断するパターン。
 # これに当たる画面を「待ちで止まった」と判定すると、正当にブロックしている部下を
@@ -86,6 +104,7 @@ while :; do
   if [ -n "$(bash "$INBOX" "$MISSION" --peek --no-ledger 2>/dev/null)" ]; then
     printf 'watch: 新しい動きを検知（稼働 %s 人）。以下を処理すること\n' "$active"
     bash "$INBOX" "$MISSION" 2>/dev/null | head -60
+    rearm_line
     exit 0
   fi
 
@@ -113,11 +132,22 @@ while :; do
       printf 'watch: 「待ち」でターンを終えて止まっている部下: %s\n' "$report"
       printf 'watch: 司令官が gh pr checks で外側の状態を確認し、済んでいれば cmux send で押すこと\n'
       printf 'watch: 画面が動いていれば誤検知。同じ画面では再通知しないので放置してよい\n'
+      rearm_line
       exit 0
     fi
   fi
 
-  # 沈黙の検知: 報告が無いまま長時間経った部下を知らせる（agent hook の通知に頼らない）
+  # 沈黙の検知: 報告が無いまま長時間経った部下を知らせる（agent hook の通知に頼らない）。
+  #
+  # 罠（実際に踏んだ。司令官が watch.sh を捨てて部下ごとの使い捨てスクリプトに走った原因）:
+  # 経過分数を spawn 時刻（started_at）からの単純な差分で出すと、いったん 60 分を超えた
+  # 部下がいる限り、この判定は**張り直すたびに毎回、間を置かず即座に成立し続ける**。
+  # 「1回検知したら exit する」設計と組み合わさると、司令官が張り直すたびに同じ内容で
+  # 即終了するだけの役に立たない監視になり、司令官はそれを避けて `wait-<no>.sh` のような
+  # 自作スクリプトに逃げた（それ自体が別の事故を生んだ）。
+  # 対策: 「何分に到達したか」ではなく「前回どの 60 分区切り（バケット）まで報告済みか」を
+  # $SILENCE_STATE に記録し、**新しいバケットに進んだときだけ**報告する。同じ部下が
+  # 60〜119分の間ずっと沈黙していても、120分に達するまで再通知しない。
   stalled=""
   while IFS= read -r row; do
     [ -n "$row" ] || continue
@@ -129,18 +159,26 @@ while :; do
     mins=$(( ( $(date +%s) - ep ) / 60 ))
     if [ "$mins" -ge 60 ] && [ ! -s "$MISSION/workers/$no/REPORT.md" ] \
        && [ ! -s "$MISSION/workers/$no/PLAN.md" ]; then
-      stalled="${stalled}${no}(${mins}分) "
+      bucket=$(( mins / 60 ))
+      prev=$(get_silence_bucket "$no"); prev=${prev:-0}
+      case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+      if [ "$bucket" -gt "$prev" ]; then
+        stalled="${stalled}${no}(${mins}分) "
+        put_silence_bucket "$no" "$bucket"
+      fi
     fi
   done < "$ROSTER"
   if [ -n "$stalled" ]; then
     printf 'watch: 60分以上 報告が無い部下がいる: %s\n' "$stalled"
     printf 'watch: 画面を見て介入するか判断すること（cmux read-screen）\n'
+    rearm_line
     exit 0
   fi
 
   waited=$((waited+IV))
   if [ "$waited" -ge "$MAX" ]; then
     printf 'watch: %s 秒待ったが動きなし（稼働 %s 人）。監視を張り直すこと\n' "$MAX" "$active"
+    rearm_line
     exit 0
   fi
   sleep "$IV"

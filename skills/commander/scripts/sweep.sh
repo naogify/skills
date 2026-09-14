@@ -19,13 +19,21 @@ ROSTER="$MISSION/roster.jsonl"
 command -v jq >/dev/null || die "jq が無い"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# QUESTION.md / BLOCKED.md を「未回答のまま放置している」とみなす経過分数。
+# 実際に QUESTION.md が 4 日放置された事故があるので、既定は短めの 30 分にする。
+# COMMANDER_STALE_MIN で上書きできる。
+STALE_MIN=${COMMANDER_STALE_MIN:-30}
+
 pending=0
 printf '=== sweep: %s ===\n' "$MISSION"
 
-# ── 1. 稼働中（未撤収）の部下を洗い出し、REPORT があるのに撤収されていない部下を先頭に突き付ける ──
+# ── 1. 稼働中（未撤収）の部下を洗い出し、REPORT があるのに撤収されていない部下・
+#      長時間放置された QUESTION/BLOCKED を先頭に突き付ける ──
 starred=""
+stale=""
 detail=""
 active_count=0
+now_epoch=$(date -u +%s)
 while IFS= read -r row; do
   [ -n "$row" ] || continue
   no=$(printf '%s' "$row" | jq -r '.no'); name=$(printf '%s' "$row" | jq -r '.name')
@@ -38,10 +46,23 @@ while IFS= read -r row; do
     p="$WDIR/$f.md"
     [ -s "$p" ] || continue
     mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$p" 2>/dev/null || stat -c '%y' "$p" 2>/dev/null | cut -c1-16)
+    mt_epoch=$(stat -f '%m' "$p" 2>/dev/null || stat -c '%Y' "$p" 2>/dev/null)
     case "$f" in
       REPORT)   rep="更新:${mt}" ;;
-      QUESTION) que="更新:${mt}" ;;
-      BLOCKED)  blk="更新:${mt}" ;;
+      QUESTION) que="更新:${mt}"
+                if [ -n "${mt_epoch:-}" ]; then
+                  qmins=$(( (now_epoch - mt_epoch) / 60 ))
+                  if [ "$qmins" -ge "$STALE_MIN" ] 2>/dev/null; then
+                    stale="${stale}⚠ 部下${no} ${name}: QUESTION.md が ${qmins}分 未回答のまま放置されている（${mt}）\n"
+                  fi
+                fi ;;
+      BLOCKED)  blk="更新:${mt}"
+                if [ -n "${mt_epoch:-}" ]; then
+                  bmins=$(( (now_epoch - mt_epoch) / 60 ))
+                  if [ "$bmins" -ge "$STALE_MIN" ] 2>/dev/null; then
+                    stale="${stale}⚠ 部下${no} ${name}: BLOCKED.md が ${bmins}分 人間の判断待ちのまま放置されている（${mt}）\n"
+                  fi
+                fi ;;
     esac
   done
 
@@ -57,6 +78,15 @@ done < "$ROSTER"
 if [ -n "$starred" ]; then
   printf -- '--- ★ REPORT があるのに撤収されていない部下（最優先） ---\n'
   printf '%b' "$starred"
+  pending=1
+fi
+
+# 実際の事故: 部下が QUESTION.md を書いて needs-attention にしたまま、司令官が気づかず
+# 4 日間放置した（部下は指示どおりその場で待機していた）。REPORT の有無だけでなく
+# QUESTION/BLOCKED の経過時間も機械的に突き付ける（意志・体感に頼らない）。
+if [ -n "$stale" ]; then
+  printf -- '--- ⚠ %s分以上 放置されている QUESTION/BLOCKED（最優先） ---\n' "$STALE_MIN"
+  printf '%b' "$stale"
   pending=1
 fi
 
