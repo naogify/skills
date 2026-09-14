@@ -755,6 +755,62 @@ else
   printf '      画面クリーン: %s\n' "$out14b" | head -6
 fi
 
+# 6u) バグD（部下47・49・50）の退行検査: cwd が「git リポジトリのサブディレクトリ」
+#     （worktree ではない。メインの作業ツリーの奥のディレクトリ）のとき、6p のロジックで
+#     worktree と誤判定して無関係なメインリポジトリの `git status` を丸ごと「未 commit の
+#     変更」として拾わないか。
+#     原因: `git rev-parse --git-dir` は絶対パス、`--git-common-dir` はリポジトリルートから
+#     の相対パス（例: `../../.git`）で返るため、同じ場所を指していても文字列比較で
+#     一致しない。実測（このバグを踏んだときの値）:
+#       git-dir        = /Users/naoppy/.claude/.git       ← 絶対パス
+#       git-common-dir = ../../../../.git                 ← 相対パス
+#       toplevel       = /Users/naoppy/.claude
+#     `workers/<n>` は司令官が mkdir しただけの git と無関係なディレクトリだが、
+#     `~/.claude` は git リポジトリなので、そのサブディレクトリで実行すると常にこれが起きる
+#     （~/.claude 固有の問題ではない。git リポジトリのサブディレクトリで実行すれば常に起きる）。
+g15="$SANDBOX/g15"; mkdir -p "$g15"
+repo="$g15/repo"; mission="$g15/mission"
+sub="$repo/sub/dir"
+mkdir -p "$sub"
+git init -q "$repo" \
+  && git -C "$repo" config user.email t@t.example \
+  && git -C "$repo" config user.name t \
+  && git -C "$repo" commit -q --allow-empty -m init
+# メインリポジトリ側に「無関係な未 commit の変更」を作る（sub/dir とは無関係な場所）
+echo 'unrelated change' > "$repo/unrelated.txt"
+mkdir -p "$mission/workers/1"
+printf '## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/REPORT.md"
+jq -nc --arg cwd "$sub" \
+  '{no:"1",name:"g15",ws_ref:"",ws_id:"",worktree:"",repo:"",base:"main",cwd:$cwd}' \
+  > "$mission/roster.jsonl"
+out15=$(bash "$D/retire.sh" "$mission" 1 2>&1)
+if [ -d "$sub" ] && [ -f "$mission/workers/1/RETIRED" ] \
+   && ! printf '%s' "$out15" | grep -q '未 commit の変更が残っている'; then
+  ok 'バグD 退行検査: cwd が git リポジトリのサブディレクトリ（worktree ではない）なら worktree 扱いせず、無関係な変更を誤検知しない'
+else
+  bad 'バグD の退行: cwd が git リポジトリのサブディレクトリなのに worktree と誤判定し、無関係なメインリポジトリの変更を拾って撤収できない'
+  printf '%s\n' "$out15" | sed 's/^/      /' | head -8
+fi
+
+# 6v) バグD の対照検査: cwd がどのリポジトリにも属さない素のディレクトリなら
+#     当然 worktree 扱いせず、普通に撤収できることを確認する。
+g16="$SANDBOX/g16"; mkdir -p "$g16"
+plain="$g16/plain"; mission="$g16/mission"
+mkdir -p "$plain"
+mkdir -p "$mission/workers/1"
+printf '## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/REPORT.md"
+jq -nc --arg cwd "$plain" \
+  '{no:"1",name:"g16",ws_ref:"",ws_id:"",worktree:"",repo:"",base:"main",cwd:$cwd}' \
+  > "$mission/roster.jsonl"
+out16=$(bash "$D/retire.sh" "$mission" 1 2>&1)
+if [ -d "$plain" ] && [ -f "$mission/workers/1/RETIRED" ] \
+   && ! printf '%s' "$out16" | grep -q '未 commit の変更が残っている'; then
+  ok 'バグD 対照検査: cwd がどのリポジトリにも属さない素のディレクトリなら worktree 扱いせず撤収できる'
+else
+  bad 'バグD 対照検査の退行: git と無関係な素のディレクトリなのに撤収できない'
+  printf '%s\n' "$out16" | sed 's/^/      /' | head -8
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
