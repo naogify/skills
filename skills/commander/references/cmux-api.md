@@ -129,6 +129,9 @@ cmux log --level success --source worker "REPORT: <1行要約>"
 
 ## 司令官 → 部下（指示）
 
+**生の `cmux send` を直接叩かない。`scripts/send.sh "$MISSION" <no> "<指示>"` を使う**
+（SKILL.md の罠・「実際に起きたこと」参照）。以下は `send.sh` が内部でやっていることの説明:
+
 ```bash
 CMUX_QUIET=1 cmux send --workspace workspace:49 "<指示>"
 CMUX_QUIET=1 cmux send-key --workspace workspace:49 enter
@@ -136,6 +139,10 @@ CMUX_QUIET=1 cmux send-key --workspace workspace:49 enter
 
 **`send` は Enter を押さない。** テキスト内に `\n` を入れるか `send-key enter` を別に打つ。
 `OK` は「ソケットが受け取った」だけで、model に届いた証拠ではない（SKILL.md の罠を参照）。
+
+入力欄のプロンプト文字は **`❯`（U+276F）であって、素の `>` ではない**（実機で確認済み）。
+届いたかどうかを `read-screen` で裏取りするときは、`>` だけでなく `❯` も見る
+（`send.sh` は両方を見る）。
 
 ## 司令官 → 部下のワークスペース（表示メタ）
 

@@ -19,7 +19,7 @@ bad() { printf '  NG   %s\n' "$1"; fail=1; }
 printf 'マージ可否チェック: %s #%s\n' "$REPO" "$PR"
 
 info=$(gh pr view "$PR" --repo "$REPO" \
-  --json mergeStateStatus,mergeable,reviewDecision,headRefOid,state 2>/dev/null) \
+  --json mergeStateStatus,mergeable,reviewDecision,headRefOid,baseRefName,state 2>/dev/null) \
   || die "gh pr view に失敗した（PR番号・repo を確認する）"
 
 state=$(printf '%s' "$info" | jq -r '.state')
@@ -29,12 +29,35 @@ mss=$(printf '%s' "$info" | jq -r '.mergeStateStatus')
 mgbl=$(printf '%s' "$info" | jq -r '.mergeable')
 rd=$(printf '%s' "$info" | jq -r '.reviewDecision')
 head=$(printf '%s' "$info" | jq -r '.headRefOid')
+base=$(printf '%s' "$info" | jq -r '.baseRefName')
 
 case "$mss" in
   CLEAN|UNSTABLE) ok "mergeStateStatus=${mss}" ;;
   *) bad "mergeStateStatus=${mss}（CLEAN / UNSTABLE 以外はマージしない）" ;;
 esac
 printf '  情報 mergeable=%s reviewDecision=%s headRefOid=%s\n' "$mgbl" "${rd:-null}" "$head"
+
+# ── base より古いコミットから切られたブランチではないか ──
+# `mergeStateStatus=CLEAN` はテキスト上のコンフリクトが無いことしか保証しない。
+# base 側で先にマージされた**別の PR**の変更を、textual には衝突しないまま
+# マージ結果が巻き戻すことがある（実例: 古い main から切った PR #28 が、11分前にマージ
+# された PR #29 の変更を巻き戻した。両方とも mergeStateStatus=CLEAN のままマージできた）。
+# `compare` API の `behind_by` で「head が base に対して何コミット遅れているか」を機械的に見る。
+if [ -n "$base" ] && [ "$base" != "null" ]; then
+  cmp=$(gh api "repos/${REPO}/compare/${base}...${head}" 2>/dev/null)
+  if [ -n "$cmp" ]; then
+    behind=$(printf '%s' "$cmp" | jq -r '.behind_by // empty' 2>/dev/null)
+    case "$behind" in
+      ''|*[!0-9]*) printf '  WARN base(%s) との比較（behind_by）を取得できなかった\n' "$base" ;;
+      0) ok "base(${base}) の最新コミットを含んでいる（behind_by=0）" ;;
+      *) bad "head が base(${base}) より ${behind} コミット遅れている（behind_by=${behind}）。古いブランチのままマージすると、base 側で先にマージされた別の変更を巻き戻す危険がある。ブランチを最新の ${base} に合わせてから再検収する" ;;
+    esac
+  else
+    printf '  WARN base(%s) との比較（compare API）を取得できなかった\n' "$base"
+  fi
+else
+  printf '  WARN baseRefName が取得できず、base との新旧比較を省略した\n'
+fi
 
 # ── CI の各 check ──
 checks=$(gh pr checks "$PR" --repo "$REPO" --json name,state,bucket 2>/dev/null)
