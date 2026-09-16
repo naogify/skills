@@ -957,6 +957,91 @@ else
   printf '%s\n' "$out20" | sed 's/^/      /' | head -6
 fi
 
+# 6z) report-watch.sh の退行検査: watch.sh の「1回発火したら死ぬ」を live reload 型（常駐 watcher）
+#     に置き換えたスクリプト。事故3（監視の張り直しが止まったまま34時間放置され、その間に
+#     14人起動・8人が報告済みだったのに1件も拾えなかった）の再発防止がここにかかっているので、
+#     外したら赤くなることを確認してから入れる。本物の fswatch には依存させず、
+#     REPORT_WATCH_FORCE_POLL=1 でポーリング経路（フォールバックと同じコード）を強制して検査する。
+g18="$SANDBOX/g18"; mkdir -p "$g18/workers/1" "$g18/workers/2" "$g18/workers/3"
+touch "$g18/workers/2/RETIRED"
+printf '## 結論\n起動前から存在する報告（catch-up 対象）\n' > "$g18/workers/1/REPORT.md"
+printf '## 質問\n撤収済みなので出てはいけない\n' > "$g18/workers/2/QUESTION.md"
+printf '# 指令書\n報告ファイルではないので出てはいけない\n' > "$g18/workers/3/PROMPT.md"
+
+out18="$g18/out.log"; err18="$g18/err.log"
+REPORT_WATCH_FORCE_POLL=1 REPORT_WATCH_POLL_INTERVAL=1 REPORT_WATCH_DEBOUNCE_SEC=2 \
+  timeout 6 bash "$D/report-watch.sh" "$g18" > "$out18" 2> "$err18" &
+pid18=$!
+sleep 1.5   # catch-up と、起動後に置くファイル用のポーリング1周分を待つ
+mkdir -p "$g18/workers/4"
+printf '## 質問\n起動後に新規で出た報告\n' > "$g18/workers/4/QUESTION.md"
+mkdir -p "$g18/workers/5"
+printf '# 指令書\n起動後に置かれた指令書。出てはいけない\n' > "$g18/workers/5/PROMPT.md"
+sleep 2.5
+kill "$pid18" 2>/dev/null; wait "$pid18" 2>/dev/null
+
+if grep -q '部下1 REPORT:' "$out18" \
+   && grep -q '部下4 QUESTION:' "$out18" \
+   && ! grep -q '部下2' "$out18" \
+   && ! grep -q '部下3' "$out18" \
+   && ! grep -q '部下5' "$out18"; then
+  ok 'report-watch.sh: --catch-up で起動前からの報告を出し、稼働中は新規報告も出す（RETIRED・報告以外のファイルは除外）'
+else
+  bad 'report-watch.sh の退行: catch-up / 稼働中の新規検知 / RETIRED除外 / 報告以外の除外のいずれかが壊れている'
+  sed 's/^/      /' "$out18"
+fi
+
+if ! grep -q '^部下' "$err18" 2>/dev/null && grep -q 'ポーリングにフォールバックする' "$err18" 2>/dev/null; then
+  ok 'report-watch.sh: fswatch 不在時のフォールバック表示は stderr に出て stdout（通知）を汚さない'
+else
+  bad 'report-watch.sh の退行: フォールバック表示が stdout に混ざっている、または表示自体が無い'
+fi
+
+# --no-catch-up: 起動前から存在した報告を出さない
+g18b="$SANDBOX/g18b"; mkdir -p "$g18b/workers/1"
+printf '## 結論\n起動前から存在するが --no-catch-up なので出てはいけない\n' > "$g18b/workers/1/REPORT.md"
+out18b="$g18b/out.log"
+REPORT_WATCH_FORCE_POLL=1 REPORT_WATCH_POLL_INTERVAL=1 \
+  timeout 3 bash "$D/report-watch.sh" "$g18b" --no-catch-up > "$out18b" 2>/dev/null &
+pid18b=$!
+sleep 2
+kill "$pid18b" 2>/dev/null; wait "$pid18b" 2>/dev/null
+if [ ! -s "$out18b" ]; then
+  ok 'report-watch.sh: --no-catch-up を付けると起動前からの報告を出さない'
+else
+  bad 'report-watch.sh の退行: --no-catch-up が効いていない'
+  sed 's/^/      /' "$out18b"
+fi
+
+# デバウンスの既定値（仕様: 5秒以内の二重書き込みは1回だけ）はソースを直接検査する。
+# 挙動そのものは selftest を5秒以上待たせないよう、短い値に差し替えて確認する。
+if grep -qE 'DEBOUNCE_SEC=\$\{REPORT_WATCH_DEBOUNCE_SEC:-5\}' "$D/report-watch.sh"; then
+  ok 'report-watch.sh: デバウンスの既定値は仕様どおり5秒'
+else
+  bad 'report-watch.sh の退行: デバウンスの既定値が5秒でなくなっている'
+fi
+
+g18c="$SANDBOX/g18c"; mkdir -p "$g18c/workers/6"
+out18c="$g18c/out.log"
+REPORT_WATCH_FORCE_POLL=1 REPORT_WATCH_POLL_INTERVAL=1 REPORT_WATCH_DEBOUNCE_SEC=2 \
+  timeout 8 bash "$D/report-watch.sh" "$g18c" --no-catch-up > "$out18c" 2>/dev/null &
+pid18c=$!
+sleep 0.5
+printf '## 結論\n1回目\n' > "$g18c/workers/6/REPORT.md"
+sleep 0.5
+printf '## 結論\n2回目（デバウンス内。出てはいけない）\n' > "$g18c/workers/6/REPORT.md"
+sleep 3
+printf '## 結論\n3回目（デバウンス切れ後。出るはず）\n' > "$g18c/workers/6/REPORT.md"
+sleep 2
+kill "$pid18c" 2>/dev/null; wait "$pid18c" 2>/dev/null
+lines18c=$(grep -c '部下6 REPORT:' "$out18c" 2>/dev/null || true); lines18c=${lines18c:-0}
+if [ "$lines18c" = "2" ]; then
+  ok 'report-watch.sh: 同一ファイルへの短時間の二重書き込みは1回だけに間引き、デバウンスが切れれば再通知する'
+else
+  bad "report-watch.sh の退行: デバウンスが壊れている（想定2行、実際${lines18c}行）"
+  sed 's/^/      /' "$out18c"
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
