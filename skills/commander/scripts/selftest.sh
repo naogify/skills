@@ -811,6 +811,79 @@ else
   printf '%s\n' "$out16" | sed 's/^/      /' | head -8
 fi
 
+# 6y) send.sh の退行検査: 「送ったのに届いていない」を潰したか
+#     事故: cmux send は Enter を押さないことがあり、入力欄が空に見える瞬間もある。
+#     以前の判定は「❯ の直後に本文が続く行が無いか」だけを見ていたため、本文が
+#     折り返されて ❯ の付かない行に残っている場合を見逃し、実際には未送信なのに
+#     「届いた」と誤って報告した（このセッションで3回発生し、部下が指示を受け
+#     取れないまま両者が止まった）。
+#     本物の cmux には依存せず、read-screen の応答を呼び出し回数で差し替える
+#     スタブに置き換えて検証する。
+g17="$SANDBOX/g17"; mkdir -p "$g17/bin" "$g17/screens" "$g17/mission/workers/42"
+jq -nc '{no:"42",name:"g17",ws_ref:"workspace:99",ws_id:""}' > "$g17/mission/roster.jsonl"
+cat > "$g17/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  send) exit 0 ;;
+  send-key) exit 0 ;;
+  read-screen)
+    n=$(( $(cat "$COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > "$COUNTER_FILE"
+    f="$SCREEN_DIR/screen.$n"
+    [ -f "$f" ] || f="$SCREEN_DIR/screen.last"
+    cat "$f" 2>/dev/null
+    exit 0
+    ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
+# 呼び出しごとに screens/<サブディレクトリ> を用意してから呼ぶこと
+# （このヘルパー自体は screens を作り直さない。呼び出し回数をまたいだ状態を
+#  screen.1, screen.2, ... / フォールバックの screen.last で表現する）
+run17() {
+  local scrsub="$1"; shift
+  : > "$g17/counter"
+  PATH="$g17/bin:$PATH" COUNTER_FILE="$g17/counter" SCREEN_DIR="$g17/screens/$scrsub" \
+    bash "$D/send.sh" "$g17/mission" 42 "$@" 2>&1
+}
+
+# 6y-1) 対照検査: 正常時（入力欄が最初から空）は従来どおり試行1回で成功する
+scrsub="ok1"; mkdir -p "$g17/screens/$scrsub"; printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
+out17a=$(run17 "$scrsub" "hello world message twenty four chars")
+if printf '%s' "$out17a" | grep -q '^OK ' && printf '%s' "$out17a" | grep -q '試行1回'; then
+  ok 'send.sh 対照検査: 入力欄が最初から空なら従来どおり試行1回で成功する'
+else
+  bad 'send.sh 対照検査の退行: 正常時に1回で成功しなくなっている'
+  printf '%s\n' "$out17a" | sed 's/^/      /'
+fi
+
+# 6y-2) 対照検査: Enter が押されず ❯ の直後に本文が残ったままなら再送が走る
+scrsub="stuck"; mkdir -p "$g17/screens/$scrsub"
+printf '❯ 送信予定のテキストが残ったままの画面\n' > "$g17/screens/$scrsub/screen.1"
+printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
+out17b=$(run17 "$scrsub" "送信予定のテキストが残ったままの画面")
+if printf '%s' "$out17b" | grep -q '再試行する' && printf '%s' "$out17b" | grep -q '試行2回'; then
+  ok 'send.sh 退行検査: Enter が押されず本文が ❯ の直後に残った状態では再送が走り、2回目で成功する'
+else
+  bad 'send.sh の退行: 入力欄に本文が残ったままでも再送されない、または成功と誤判定している'
+  printf '%s\n' "$out17b" | sed 's/^/      /'
+fi
+
+# 6y-3) 本丸の退行検査: 入力欄（❯ の行）は空に見えても、送った本文の断片が
+#     ❯ の付かない行として画面のどこかに残っていれば「未送信」として再送する
+scrsub="residue"; mkdir -p "$g17/screens/$scrsub"
+printf '❯ \n  original message body twenty four chars continued here\n' > "$g17/screens/$scrsub/screen.1"
+printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
+out17c=$(run17 "$scrsub" "original message body twenty four chars continued here")
+if printf '%s' "$out17c" | grep -q '再試行する' && printf '%s' "$out17c" | grep -q '^OK ' \
+   && printf '%s' "$out17c" | grep -q '試行2回'; then
+  ok 'send.sh 退行検査: 入力欄が空でも本文の断片が画面に残っていれば未送信と判定し、再送する（今回の本丸バグ）'
+else
+  bad '送信済み誤判定の退行: 入力欄が空に見えるだけで、本文の断片が画面に残ったままなのに成功と誤判定している'
+  printf '%s\n' "$out17c" | sed 's/^/      /'
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"

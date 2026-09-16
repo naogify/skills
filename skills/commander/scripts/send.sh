@@ -59,6 +59,34 @@ prompt_has_text() {
   printf '%s' "$1" | grep -E '^[[:space:]]*[❯>][[:space:]]+[^[:space:]]' >/dev/null 2>&1
 }
 
+# 「入力欄は空に見えるが、折り返された本文の続きが ❯ の付かない行として画面の
+# どこかに残っている」ケースを拾うための断片抽出（実際に3回、これで見逃した）。
+# 先頭の空でない行の先頭24文字を断片として使う。
+text_fragment() {
+  local text=$1 line
+  while IFS= read -r line; do
+    case "$line" in
+      *[![:space:]]*)
+        line="${line#"${line%%[![:space:]]*}"}"
+        printf '%s' "${line:0:24}"
+        return
+        ;;
+    esac
+  done <<EOF
+$text
+EOF
+}
+
+# 入力欄のプロンプト行が空に見えても、送った本文の断片が画面のどこかに
+# 残っていれば「届いていない」とみなす。断片が短すぎる（8文字未満）場合は
+# 誤検知を避けるため判定しない。
+text_residue_present() {
+  local scr=$1 frag
+  frag=$(text_fragment "$TEXT")
+  [ ${#frag} -ge 8 ] || return 1
+  printf '%s' "$scr" | grep -qF -- "$frag"
+}
+
 attempt=0
 for attempt in 1 2 3 4; do
   out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
@@ -75,12 +103,12 @@ for attempt in 1 2 3 4; do
       exit 0 ;;
   esac
 
-  if ! prompt_has_text "$scr"; then
+  if ! prompt_has_text "$scr" && ! text_residue_present "$scr"; then
     printf 'OK 部下%s %s（%s）に届いた（入力欄が空になったことを確認。試行%s回）\n' \
       "$NO" "$NAME" "$REF" "$attempt"
     exit 0
   fi
-  printf 'send: 試行%s回目: 入力欄にまだ本文が残っている。send-key enter を再試行する\n' "$attempt" >&2
+  printf 'send: 試行%s回目: 入力欄に本文が残っている、または画面に断片が残っている。send-key enter を再試行する\n' "$attempt" >&2
 done
 
 printf 'send: 部下%s %s（%s）: %s回試しても入力欄に本文が残ったまま。cmux read-screen --workspace %s で画面を確認すること\n' \
