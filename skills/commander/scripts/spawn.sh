@@ -51,6 +51,8 @@ grep -q 'cmux todo' "$WDIR/PROMPT.md" \
   || die "$WDIR/PROMPT.md に報告プロトコルが無い（cmux todo が出てこない）。templates/ から作り直す"
 grep -qF "$WDIR" "$WDIR/PROMPT.md" \
   || die "$WDIR/PROMPT.md の報告先が自分のディレクトリ($WDIR)になっていない。他の部下の指令書を流用した可能性"
+grep -q '検証' "$WDIR/PROMPT.md" \
+  || die "$WDIR/PROMPT.md に検証の節が無い（templates/worker-prompt.md から作り直す。「編集したファイルを読み返すのは検証ではない」を必ず含める）"
 
 MODEL=${COMMANDER_MODEL:-sonnet}
 
