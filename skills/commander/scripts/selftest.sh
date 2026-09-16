@@ -360,8 +360,9 @@ chmod +x "$g5/bin/cmux"
 stall_state="$mission5/watch.stall.state"; : > "$stall_state"
 scan_waiting_src=$(sed -n '/^scan_waiting() {/,/^}/p' "$D/watch.sh")
 dedup_src=$(sed -n '/^  first="\$(scan_waiting)"$/,/^  fi$/p' "$D/watch.sh")
-if [ -z "$scan_waiting_src" ] || [ -z "$dedup_src" ]; then
-  bad 'watch.sh から scan_waiting() / 既読つき停止検知ブロックを抽出できない（実装が変わった？ selftest も追随させる）'
+status_state_src=$(sed -n '/^status_state() {/,/^}/p' "$D/watch.sh")
+if [ -z "$scan_waiting_src" ] || [ -z "$dedup_src" ] || [ -z "$status_state_src" ]; then
+  bad 'watch.sh から scan_waiting() / 既読つき停止検知ブロック / status_state() を抽出できない（実装が変わった？ selftest も追随させる）'
 else
   run5() {
     (
@@ -369,6 +370,7 @@ else
       SCREEN_TEXT_FILE="$screen_file"
       export MISSION ROSTER STALL_STATE SCREEN_TEXT_FILE PATH="$g5/bin:$PATH"
       eval "$is_active_src"
+      eval "$status_state_src"
       eval "$scan_waiting_src"
       sleep() { :; }  # 20 秒待たせない
       rearm_line() { :; }  # dedup_src が呼ぶ。このテストでは中身を見ないのでスタブでよい
@@ -606,8 +608,9 @@ fi
 #       - 途中で撤収（RETIRED）された部下は検知対象から外れる
 silence_funcs_src=$(sed -n '/^get_silence_bucket() {/,/^}/p' "$D/watch.sh")
 silence_block_src=$(sed -n '/^  stalled=""$/,/^  fi$/p' "$D/watch.sh")
-if [ -z "$silence_funcs_src" ] || [ -z "$silence_block_src" ]; then
-  bad 'watch.sh から沈黙検知の関数・ブロックを抽出できない（実装が変わった？ selftest も追随させる）'
+status_state_src=$(sed -n '/^status_state() {/,/^}/p' "$D/watch.sh")
+if [ -z "$silence_funcs_src" ] || [ -z "$silence_block_src" ] || [ -z "$status_state_src" ]; then
+  bad 'watch.sh から沈黙検知の関数・ブロック / status_state() を抽出できない（実装が変わった？ selftest も追随させる）'
 else
   g12="$SANDBOX/g12"; mkdir -p "$g12/workers/1" "$g12/workers/2" "$g12/workers/3"
   mission="$g12"
@@ -622,6 +625,7 @@ else
     (
       MISSION="$1"; ROSTER="$1/roster.jsonl"; SILENCE_STATE="$1/watch.silence.state"
       rearm_line() { :; }  # このテストでは呼ばれたことだけ分かればよい
+      eval "$status_state_src"
       eval "$silence_funcs_src"
       eval "$silence_block_src"
     )
@@ -1042,6 +1046,20 @@ else
   sed 's/^/      /' "$out18c"
 fi
 
+# 6z-2) 部下86 の新規検査: report-watch.sh は STATUS.md（新形式）も catch-up で検知するか。
+#      is_report_file() / find_report_files() の対象一覧に STATUS.md を足したので、
+#      抜けているとこの常駐監視だけが新形式の報告を一生検知しないままになる。
+g18d="$SANDBOX/g18d"; mkdir -p "$g18d/workers/9"
+printf 'STATE: done\n## 結論\nテスト\n' > "$g18d/workers/9/STATUS.md"
+out18d="$g18d/out.log"
+timeout 3 bash "$D/report-watch.sh" "$g18d" > "$out18d" 2>/dev/null
+if grep -q '部下9 STATUS: STATE: done' "$out18d"; then
+  ok '部下86 新規検査: report-watch.sh は STATUS.md（新形式）も catch-up で検知する'
+else
+  bad '部下86 の退行: report-watch.sh が STATUS.md（新形式）を検知しない'
+  sed 's/^/      /' "$out18d"
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
@@ -1086,6 +1104,95 @@ if printf '%s' "$out17" | grep -q '部下1 g17-overloaded: todo が 10 件に積
 else
   bad '部下83 の退行(board.sh): todo が積み上がった部下でも警告が出ない（積みすぎ検知が抜けている）'
   printf '%s\n' "$out17" | sed 's/^/      /' | head -12
+fi
+
+# 10) 部下86 の新規検査: STATUS.md（新形式・1本）による報告の簡素化。
+#     REPORT/QUESTION/BLOCKED/PLAN/PR.md の5種類を、状態を1行目に書く STATUS.md 1本へ
+#     まとめた。状態は上書きで変わるので、消し忘れによる「嘘の残留」が構造的に起きない。
+#     旧形式は移行期間として読み続ける（既存の workers/ 配下のファイルを壊さない）。
+
+# 10a) STATUS.md で STATE: done を書いたら inbox.sh が検知するか
+g18="$SANDBOX/g18"; mkdir -p "$g18/mission/workers/1"
+mission="$g18/mission"
+jq -nc '{no:"1",name:"g18",ws_ref:"",ws_id:""}' > "$mission/roster.jsonl"
+printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/STATUS.md"
+out18a=$(bash "$D/inbox.sh" "$mission" --peek --no-ledger 2>&1)
+if printf '%s' "$out18a" | grep -q 'STATUS: done'; then
+  ok '部下86 新規検査: STATUS.md（新形式）で STATE: done を書いたら inbox.sh が検知する'
+else
+  bad '部下86 の退行: inbox.sh が STATUS.md（新形式）の完了を検知しない'
+  printf '%s\n' "$out18a" | sed 's/^/      /' | head -10
+fi
+
+# 10b) STATUS.md が STATE: needs-answer のとき retire.sh が撤収を拒否するか
+g19="$SANDBOX/g19"; mkdir -p "$g19/mission/workers/1"
+mission="$g19/mission"
+jq -nc '{no:"1",name:"g19",ws_ref:"",ws_id:""}' > "$mission/roster.jsonl"
+printf 'STATE: needs-answer\n## 論点\nテスト\n' > "$mission/workers/1/STATUS.md"
+out19=$(bash "$D/retire.sh" "$mission" 1 2>&1); rc19=$?
+if [ "$rc19" = "3" ] && printf '%s' "$out19" | grep -q 'needs-answer' && [ ! -f "$mission/workers/1/RETIRED" ]; then
+  ok '部下86 新規検査: STATUS.md が needs-answer のとき retire.sh は撤収を拒否する'
+else
+  bad '部下86 の退行: STATUS.md が needs-answer でも retire.sh が撤収してしまう（安全弁が効いていない）'
+  printf '%s\n' "$out19" | sed 's/^/      /'
+fi
+
+# 10c) 状態を「完了」に上書きしたら、前の状態（needs-answer）が残らないか。
+#      旧形式は QUESTION.md を消し忘れると撤収が拒否され続けたが、新形式は同じファイルを
+#      上書きするだけなので、削除を忘れる余地そのものが無い。
+g20="$SANDBOX/g20"; mkdir -p "$g20/mission/workers/1"
+mission="$g20/mission"
+jq -nc '{no:"1",name:"g20",ws_ref:"",ws_id:""}' > "$mission/roster.jsonl"
+printf 'STATE: needs-answer\n## 論点\nテスト\n' > "$mission/workers/1/STATUS.md"
+bash "$D/retire.sh" "$mission" 1 >/dev/null 2>&1; rc20_before=$?
+# 削除ではなく、同じファイルへ「完了」を上書きする
+printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/STATUS.md"
+out20=$(bash "$D/retire.sh" "$mission" 1 2>&1); rc20_after=$?
+if [ "$rc20_before" = "3" ] && [ "$rc20_after" = "0" ] && [ -f "$mission/workers/1/RETIRED" ] \
+   && ! printf '%s' "$out20" | grep -q 'needs-answer'; then
+  ok '部下86 新規検査: STATUS.md を「完了」に上書きすると前の needs-answer は残らず撤収できる（消し忘れによる嘘が起きない）'
+else
+  bad '部下86 の退行: STATUS.md を上書きしても前の状態が残る、または撤収できない'
+  printf '      上書き前(needs-answer, rc=%s)\n' "$rc20_before"
+  printf '      上書き後(done, rc=%s): %s\n' "$rc20_after" "$out20" | sed 's/^/      /'
+fi
+
+# 10d) 移行期間の共存検査: 旧形式（REPORT.md）の部下と新形式（STATUS.md）の部下が
+#      同じミッションに混在しても、どちらも壊れずに検知できるか（既存の workers/ 配下の
+#      報告ファイルを変換・削除せずに済む設計であることの検査）。
+g21="$SANDBOX/g21"; mkdir -p "$g21/mission/workers/1" "$g21/mission/workers/2"
+mission="$g21/mission"
+{
+  jq -nc '{no:"1",name:"g21-legacy",ws_ref:"",ws_id:""}'
+  jq -nc '{no:"2",name:"g21-new",ws_ref:"",ws_id:""}'
+} > "$mission/roster.jsonl"
+printf '## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/REPORT.md"
+printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/2/STATUS.md"
+out21=$(bash "$D/inbox.sh" "$mission" --peek --no-ledger 2>&1)
+if printf '%s' "$out21" | grep -q 'REPORT（検収する）' && printf '%s' "$out21" | grep -q 'STATUS: done'; then
+  ok '部下86 新規検査: 旧形式（REPORT.md）と新形式（STATUS.md）が同じミッションに混在しても両方検知する（移行期間の後方互換）'
+else
+  bad '部下86 の退行: 旧形式と新形式が混在すると検知できなくなる（移行の道筋が壊れている）'
+  printf '%s\n' "$out21" | sed 's/^/      /'
+fi
+
+# 10e) verify.sh は STATUS.md の STATE: done を検収でき、needs-answer は差し戻すか
+g22="$SANDBOX/g22"; mkdir -p "$g22/mission/workers/1" "$g22/mission/workers/2"
+mission="$g22/mission"
+{
+  jq -nc '{no:"1",name:"g22-done"}'
+  jq -nc '{no:"2",name:"g22-needs-answer"}'
+} > "$mission/roster.jsonl"
+printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n## 検証（コマンドと出力）\n実行して確認した\n' > "$mission/workers/1/STATUS.md"
+printf 'STATE: needs-answer\n## 論点\nテスト\n' > "$mission/workers/2/STATUS.md"
+verify22a=$(bash "$D/verify.sh" "$mission" 1 2>&1); rc22a=$?
+verify22b=$(bash "$D/verify.sh" "$mission" 2 2>&1); rc22b=$?
+if [ "$rc22a" = "0" ] && [ "$rc22b" = "1" ] && printf '%s' "$verify22b" | grep -q 'needs-answer'; then
+  ok '部下86 新規検査: verify.sh は STATUS.md の done を検収通過させ、needs-answer は差し戻す'
+else
+  bad '部下86 の退行: verify.sh が STATUS.md の状態を正しく判定できない'
+  printf '      done: %s\n' "$verify22a" | sed 's/^/      /'
+  printf '      needs-answer: %s\n' "$verify22b" | sed 's/^/      /'
 fi
 
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi

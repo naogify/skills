@@ -153,9 +153,13 @@ issue comment**に結論を書いていても、これらのクエリでは取�
 司令官との連絡は **2 つだけ**（`cmux notify` / `cmux log` / `cmux set-progress` は使わない）:
 
 1. **`cmux todo`**（チェックリスト）… 進捗の唯一の表明
-2. **報告ファイル**（`PLAN.md` / `PLAN.json` / `QUESTION.md` / `BLOCKED.md`）
+2. **`STATUS.md`**（1本だけ。状態はこれで表す）＋ 成果物（`PLAN.md` / `PLAN.json`）
 
 報告ディレクトリ: `<MISSION>/workers/0/`
+
+`STATUS.md` は1行目に `STATE: done` / `STATE: needs-answer` / `STATE: in-progress` のいずれかを書き、
+2行目以降に自由形式の本文を書く。`PLAN.md`/`PLAN.json` は状態ファイルではなく**成果物**なので、
+`STATUS.md` とは別に置く（`PR.md` が成果物として本文と別に扱われるのと同じ位置づけ）。
 
 ## 着手したら
 
@@ -169,15 +173,20 @@ printf '%s\n' '[{"text":"対象を機械的に列挙","state":"in-progress"},{"t
 
 ```bash
 jq . '<MISSION>/workers/0/PLAN.json' >/dev/null || echo "JSON が壊れている。直すまで報告しない"
+cat > '<MISSION>/workers/0/STATUS.md' <<'S'
+STATE: done
+## 結論
+<何件から何件に絞ったか。3行以内>
+S
 cmux todo check <最後の項目>
 cmux workspace status set review
 ```
 
-**`REPORT.md` は書かず、`PLAN.md` と `PLAN.json` を成果物にする。** 書いたらそのまま待機する
+**`PLAN.md` と `PLAN.json` を成果物にする。** 書いたらそのまま待機する
 （司令官が人間の承認を取ってから、追加の絞り込みを指示してくることがある）。
 
 ## 判断待ち・行き詰まり
 
-`QUESTION.md` / `BLOCKED.md` を `<MISSION>/workers/0/` に書き、
+`<MISSION>/workers/0/STATUS.md` を `STATE: needs-answer` で上書きし、
 `cmux workspace status set needs-attention` を打って止まる。
 **推測で埋めて編成案を作らない**（外した編成案は部下全員を無駄に走らせる）。

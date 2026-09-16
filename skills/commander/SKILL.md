@@ -52,7 +52,11 @@ Google Docs を自分で書いたりしている間に `watch.sh` の張り直�
    進捗が測れず、撤収の可否も判定できなくなる。
 2. **報告は 2 経路だけ。進捗はチェックリスト、中身はファイル。**
    - `cmux todo`（チェックリスト）= 部下の進捗の唯一の表明。盤面の進捗率はここから算出する
-   - `REPORT.md` / `QUESTION.md` / `BLOCKED.md` / `PLAN.md` = 判断に使う中身。司令官はこれを読む
+   - `STATUS.md`（新形式。1本だけ）= 判断に使う中身。司令官はこれを読む。1行目の
+     `STATE: done|needs-answer|in-progress` が状態で、状態が変わっても**同じファイルを上書きする**
+     （消し忘れによる嘘が構造的に起きない）。旧形式の `REPORT.md` / `QUESTION.md` / `BLOCKED.md` /
+     `PLAN.md` / `PR.md` も過渡期として引き続き読める（`workers/` に残る既存の報告のため。
+     新規の部下には `templates/` の STATUS.md 形式を使わせる）
    - **部下に `cmux notify` / `cmux log` / `cmux set-progress` を使わせない。**
      サイドバーに通知本文（最大 12 行）・ログ抜粋・進捗バーが積もって、人間が状況を読めなくなる。
      報告ファイルの出現は `inbox.sh` が検知するので、通知は要らない（かつ通知は上書きされて消える）
@@ -875,10 +879,11 @@ bash $SKILL/scripts/board.sh "$MISSION"
 
 | 状態 | 理由 |
 |---|---|
-| `BLOCKED.md` がある | 証拠が消える。人間の判断待ち |
-| `QUESTION.md` が未解決 | まだ作業が続く |
+| `STATUS.md` が `STATE: needs-answer`（新形式） | まだ判断待ち。旧形式の `QUESTION.md`/`BLOCKED.md` と同じ扱い |
+| `BLOCKED.md` がある（旧形式） | 証拠が消える。人間の判断待ち |
+| `QUESTION.md` が未解決（旧形式） | まだ作業が続く |
 | 未 commit の変更・未 push の commit がある | **作業が消える。** 消さずに人間へ上げる |
-| 報告ファイルが無い | まだ終わっていない |
+| 報告ファイルが無い（`STATUS.md` も旧形式もどちらも無い） | まだ終わっていない |
 
 消す前に機械的に確認する（不可逆な操作なので、検証だけは省かない）。
 
@@ -892,10 +897,11 @@ bash $SKILL/scripts/retire.sh "$MISSION" <no>
 - **`git fetch origin` してから**、upstream（`@{u}`）に対して未 push の commit が無いか
   （`git log @{u}..HEAD`）。**fetch を省くと、PR がマージされた直後（＝いちばん撤収したいタイミング）
   に古い ref のまま「未 push」と誤判定する**（実際に起きた）。判定は必ず fetch の後に行う
-- 部下が `REPORT.md`（先鋒なら `PLAN.md`）を書いているか。書いていなくても、`PR.md` に書かれた
-  **実物の** PR 番号が `gh pr view` で `MERGED`/`CLOSED` なら完了と見なす（PR 番号は必ず `PR.md`
-  の実物から読む。部下番号をそのまま PR 番号として使うと無関係な既存 PR に衝突する——実例:
-  部下43・44 が `PR.md` だけ書いて止まっており、対応する PR はマージ済みだったのに、
+- 部下が `STATUS.md`（新形式）を `STATE: done` で書いているか。旧形式なら `REPORT.md`
+  （先鋒なら `PLAN.md`）を書いているか。書いていなくても、`STATUS.md` 本文 / `PR.md` に
+  書かれた**実物の** PR 番号が `gh pr view` で `MERGED`/`CLOSED` なら完了と見なす
+  （PR 番号は必ず実物から読む。部下番号をそのまま PR 番号として使うと無関係な既存 PR に
+  衝突する——実例: 部下43・44 が `PR.md` だけ書いて止まっており、対応する PR はマージ済みだったのに、
   かつては部下番号を PR 番号として渡していたため未マージと誤判定され、撤収に `--force` を
   使わざるを得なかった。今は `inbox.sh` の片付け漏れ検知と同じ実物参照に揃えてある）
 

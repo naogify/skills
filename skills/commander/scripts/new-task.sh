@@ -7,7 +7,7 @@
 #   render_prompt.py workers/<key>/PROMPT.md TASK="<依頼内容>" WORKDIR="<絶対パス>" EXCLUDE="<やらないこと>"
 # （sed やシェル/Python のワンライナーで直接書き換えない）。
 #
-# 報告プロトコル（cmux todo の初期化コマンド・REPORT.md 等の節名テンプレート）は
+# 報告プロトコル（cmux todo の初期化コマンド・STATUS.md の節名テンプレート）は
 # 手書きさせず、このスクリプトが templates/worker-prompt.md 相当の内容を丸ごと埋め込む。
 set -uo pipefail
 export CMUX_QUIET=1
@@ -59,7 +59,7 @@ cat > "$WDIR/PROMPT.md" <<EOF
 
 ## 判断に迷ったら
 
-以下に当たったら、自分で決めずに \`QUESTION\` を上げて**待機する**:
+以下に当たったら、自分で決めずに \`STATUS.md\` に \`needs-answer\` を書いて**待機する**:
 
 - 公開 API / レスポンス形式・権限モデル・スキーマ変更など互換性に影響する変更
 - スコープを広げる or 狭める判断（「ついでにこれも直すべき」を含む）
@@ -75,11 +75,15 @@ typo / lint / docs 文言の反映。
 司令官との連絡は **2 つだけ**。これ以外の手段は使わない:
 
 1. **\`cmux todo\`**（チェックリスト）… 進捗の唯一の表明
-2. **報告ファイル**（\`REPORT.md\` / \`QUESTION.md\` / \`BLOCKED.md\`）… 判断に使う中身
+2. **\`STATUS.md\`**（1本だけ。判断に使う中身）
 
 **\`cmux notify\` と \`cmux log\` と \`cmux set-progress\` は使わないこと。**
 
 報告ディレクトリ: \`${WDIR}/\`  ← このパスを使う
+
+\`STATUS.md\` は常に1本だけ。1行目に \`STATE: done\` / \`STATE: needs-answer\` / \`STATE: in-progress\`
+のいずれかを書き、2行目以降に自由形式の本文を書く。状態が変わっても別ファイルを作らず、
+**同じファイルを全文上書きする**（削除・部分編集はしない。上書きなら古い状態が残らない）。
 
 ## 1. 着手したら作業計画を todo に流す
 
@@ -92,23 +96,26 @@ printf '%s\n' '[{"text":"調査","state":"in-progress"},{"text":"実装"},{"text
 ## 2. 判断待ちで止まるとき
 
 \`\`\`bash
-cat > '${WDIR}/QUESTION.md' <<'Q'
+cat > '${WDIR}/STATUS.md' <<'S'
+STATE: needs-answer
 ## 論点
 ## 選択肢
 - A: <案> / 利点 / 欠点
 - B: <案> / 利点 / 欠点
 ## 自分の推奨と理由
 ## 分かっている事実
-Q
+S
 cmux workspace status set needs-attention
 \`\`\`
 
-送ったら**セッションを終了せずその場で待機する**。答えが来たら \`QUESTION.md\` を削除して再開する。
+送ったら**セッションを終了せずその場で待機する**。答えが来たら \`STATUS.md\` を
+\`STATE: in-progress\` で上書きして再開する。
 
 ## 3. 完了したとき
 
 \`\`\`bash
-cat > '${WDIR}/REPORT.md' <<'R'
+cat > '${WDIR}/STATUS.md' <<'S'
+STATE: done
 ## 結論
 ## 特定した原因 / 調べた結果
 ## 変更したファイル
@@ -116,22 +123,23 @@ cat > '${WDIR}/REPORT.md' <<'R'
 ## 変異注入の結果
 ## ローカルゲート
 ## スコープ外にしたもの / 別 issue 候補 / 迷った判断
-R
+S
 cmux todo check <最後の項目>
 cmux workspace status set review
 \`\`\`
 
-**commit までやって push はしない。REPORT.md を書いたらその場で待機する**
-（司令官から「push して PR を作れ」の指示が来てから進む）。
+**commit までやって push はしない。\`STATE: done\` の STATUS.md を書いたらその場で待機する**
+（司令官から「push して PR を作れ」の指示が来てから進む。PR を作ったら本文に \`PR: <URL>\` を書く）。
 
 ## 4. 自力で進めないとき
 
 \`\`\`bash
-cat > '${WDIR}/BLOCKED.md' <<'B'
+cat > '${WDIR}/STATUS.md' <<'S'
+STATE: needs-answer
 ## 何ができないか
 ## 試したこと（コマンドと結果）
 ## 何があれば進めるか
-B
+S
 cmux workspace status set needs-attention
 \`\`\`
 
@@ -142,7 +150,7 @@ cmux workspace status set needs-attention
 このワークスペースの入力欄に司令官がテキストを流し込む。受け取ったら:
 
 - 内容に従って再開する
-- \`QUESTION.md\` / \`BLOCKED.md\` を削除する（未解決の目印を残さない）
+- \`STATUS.md\` を \`STATE: in-progress\` で上書きする（未解決の目印を残さない。削除ではなく上書き）
 - チェックリストを新しい段取りに更新する
 EOF
 

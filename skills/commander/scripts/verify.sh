@@ -20,14 +20,41 @@ fail=0
 ok()  { printf '  OK   %s\n' "$1"; }
 bad() { printf '  NG   %s\n' "$1"; fail=1; }
 
-REP="$WDIR/REPORT.md"; [ -s "$REP" ] || REP="$WDIR/PLAN.md"
+# 新形式（STATUS.md）の1行目から状態を読む。旧形式（REPORT/QUESTION/BLOCKED/PLAN.md）と
+# 共存する過渡期のため、STATUS.md が無い部下は今まで通り旧形式のファイルで判定する。
+status_state() {
+  [ -s "$1" ] || return 1
+  case "$(LC_ALL=C head -n1 "$1" 2>/dev/null)" in
+    "STATE: done")         printf 'done\n' ;;
+    "STATE: needs-answer") printf 'needs-answer\n' ;;
+    "STATE: in-progress")  printf 'in-progress\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -s "$WDIR/STATUS.md" ]; then
+  REP="$WDIR/STATUS.md"
+  sst=$(status_state "$REP") || sst=""
+else
+  REP="$WDIR/REPORT.md"; [ -s "$REP" ] || REP="$WDIR/PLAN.md"
+  sst=""
+fi
 printf '検収: 部下%s\n' "$NO"
 
 # 1. 報告の実在と中身
 if [ -s "$REP" ]; then ok "報告ファイル: $(basename "$REP") ($(wc -c <"$REP" | tr -d ' ') bytes)"
-else bad "報告ファイルが無い（REPORT.md / PLAN.md）"; fi
-[ -s "$WDIR/QUESTION.md" ] && bad "QUESTION.md が残っている（未回答）"
-[ -s "$WDIR/BLOCKED.md" ]  && bad "BLOCKED.md が残っている（人間の判断待ち）"
+else bad "報告ファイルが無い（REPORT.md / PLAN.md / STATUS.md）"; fi
+if [ -s "$WDIR/STATUS.md" ]; then
+  case "$sst" in
+    done) : ;;
+    needs-answer) bad "STATUS.md が needs-answer のまま（未回答）" ;;
+    in-progress)  bad "STATUS.md が in-progress のまま（検収は state=done を期待する）" ;;
+    *) bad "STATUS.md の1行目が不正（STATE: done|needs-answer|in-progress を期待）" ;;
+  esac
+else
+  [ -s "$WDIR/QUESTION.md" ] && bad "QUESTION.md が残っている（未回答）"
+  [ -s "$WDIR/BLOCKED.md" ]  && bad "BLOCKED.md が残っている（人間の判断待ち）"
+fi
 
 # 2. 証拠が書かれているか（「テスト通りました」だけの報告を弾く）
 if [ -s "$REP" ]; then

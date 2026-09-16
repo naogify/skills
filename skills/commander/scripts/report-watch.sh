@@ -48,10 +48,12 @@ DEBOUNCE_SEC=${REPORT_WATCH_DEBOUNCE_SEC:-5}
 POLL_INTERVAL=${REPORT_WATCH_POLL_INTERVAL:-2}
 FORCE_POLL=${REPORT_WATCH_FORCE_POLL:-0}
 
-# 拾うのはこの5種類だけ（判断に使う中身が入るファイル）。PROMPT.md 等の指令書は対象外。
+# 拾うのは判断に使う中身が入るファイルだけ。PROMPT.md 等の指令書は対象外。
+# `STATUS.md` が新形式（1本。状態は1行目の STATE: で表す）。旧形式
+# （REPORT/QUESTION/BLOCKED/PR/INTERIM.md）は過渡期として引き続き拾う。
 is_report_file() {
   case "$(basename "$1")" in
-    REPORT.md|QUESTION.md|BLOCKED.md|PR.md|INTERIM.md) return 0 ;;
+    STATUS.md|REPORT.md|QUESTION.md|BLOCKED.md|PR.md|INTERIM.md) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -78,7 +80,7 @@ emit_report_line() {
 # 監視対象の報告ファイルを列挙する（find の1回分）
 find_report_files() {
   find "$WORKERS" -mindepth 2 -maxdepth 2 -type f \
-    \( -name 'REPORT.md' -o -name 'QUESTION.md' -o -name 'BLOCKED.md' -o -name 'PR.md' -o -name 'INTERIM.md' \) \
+    \( -name 'STATUS.md' -o -name 'REPORT.md' -o -name 'QUESTION.md' -o -name 'BLOCKED.md' -o -name 'PR.md' -o -name 'INTERIM.md' \) \
     -print0 2>/dev/null
 }
 
