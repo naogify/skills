@@ -23,6 +23,14 @@
 # 終了コード: 0=届いた（入力欄が空になった、または処理中でキューに積まれた）
 #             1=既定回数試しても入力欄に本文が残ったまま（要介入）
 #             2=呼び出しエラー
+#             3=相手が Claude セッションに見えない（bash プロンプトだけ等）ため送信していない、
+#               または送信後に Claude の UI が画面から消えた（要介入。部下が落ちている可能性）
+#
+# 事故: `spawn.sh` が信頼ダイアログで "No, exit" を選んでしまい部下が即終了し、
+# bash プロンプトだけが残った状態に `send.sh` が2回とも「届いた」と報告した
+# （入力欄が空かどうかしか見ておらず、bash プロンプトも打ち込んだ文字を実行して
+#  消費するので「空になった」に見えてしまう）。これを塞ぐため、送信前後で
+# 「画面に Claude の UI が実際に見えているか」を確認する（`claude_ui_present`）。
 set -uo pipefail
 export CMUX_QUIET=1
 
@@ -87,6 +95,50 @@ text_residue_present() {
   printf '%s' "$scr" | grep -qF -- "$frag"
 }
 
+# 画面が「Claude セッションのUI」を実際に出しているかを分類する。
+# 手がかりは、このスキルの他スクリプト（spawn.sh / watch.sh）が実機で確認済みのものだけを使う
+# （未検証の文字列を新たに当てにしない）:
+#   - "esc to interrupt"      : 生成中（watch.sh の is_active と同じ）
+#   - "tokens)"                : スピナー行 `✻ Cooking… (3m 21s · ↓ 4.2k tokens)` の一部
+#   - "Bypassing Permissions"  : `--dangerously-skip-permissions` のモード表示
+#   - "❯"                      : 入力欄・選択ダイアログのプロンプト文字（U+276F。素の `>` ではない）
+# 既知の限界: bash 側のプロンプトを "❯" に変えるテーマ（starship 等）を使っていると
+# 誤検知しうる。この worktree 環境では既定 bash プロンプトの前提で運用する
+# （別 issue 候補。PR 本文に明記する）。
+#
+# "Enter to confirm"（信頼/権限ダイアログの共通フッター。spawn.sh が扱う2種類の
+# 起動時ダイアログいずれにも実機で出現を確認済み）が出ているときは "dialog" として
+# 別枠にする。ダイアログの上に本文を送るとキーが誤操作になりうるため、
+# 「Claude は存在するが送ってはいけない」状態として扱い、送信をブロックする。
+screen_state() {
+  case "$1" in
+    *"Enter to confirm"*) printf 'dialog\n' ;;
+    *"esc to interrupt"*|*"tokens)"*|*"Bypassing Permissions"*|*"❯"*) printf 'ok\n' ;;
+    *) printf 'absent\n' ;;
+  esac
+}
+
+# 送信していい状態かを判定し、駄目なら理由付きで stderr に出す。0=送ってよい
+verify_claude_present() {
+  case "$(screen_state "$1")" in
+    ok) return 0 ;;
+    dialog)
+      printf 'send: 部下%s %s（%s）: 確認ダイアログ（起動時の信頼/権限ダイアログ等）で止まっている。誤操作を避けるため送信しない\n' \
+        "$NO" "$NAME" "$REF" >&2
+      return 1 ;;
+    *)
+      printf 'send: 部下%s %s（%s）: 画面に Claude の UI が見当たらない（bash プロンプトだけの可能性）。送信しない\n' \
+        "$NO" "$NAME" "$REF" >&2
+      return 1 ;;
+  esac
+}
+
+scr0=$(cmux read-screen --workspace "$REF" --lines 20 2>/dev/null)
+if ! verify_claude_present "$scr0"; then
+  printf '      cmux read-screen --workspace %s --lines 20 で画面を確認せよ。部下が落ちている可能性がある\n' "$REF" >&2
+  exit 3
+fi
+
 attempt=0
 for attempt in 1 2 3 4; do
   out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
@@ -102,6 +154,12 @@ for attempt in 1 2 3 4; do
         "$NO" "$NAME" "$REF" "$attempt"
       exit 0 ;;
   esac
+
+  if ! verify_claude_present "$scr"; then
+    printf '      送信前は Claude の UI が見えていたが、送信後の画面（試行%s回目）で見えなくなった。\n' "$attempt" >&2
+    printf '      cmux read-screen --workspace %s --lines 20 で画面を確認せよ。部下が落ちている可能性がある\n' "$REF" >&2
+    exit 3
+  fi
 
   if ! prompt_has_text "$scr" && ! text_residue_present "$scr"; then
     printf 'OK 部下%s %s（%s）に届いた（入力欄が空になったことを確認。試行%s回）\n' \
