@@ -8,6 +8,18 @@ export CMUX_QUIET=1
 die() { printf '%s\n' "board: $*" >&2; exit 1; }
 [ $# -ge 1 ] || die "usage: board.sh <mission-dir>"
 MISSION=$1
+
+# 新形式（STATUS.md）の1行目から状態を読む。旧形式（REPORT/QUESTION/BLOCKED/PLAN.md）と
+# 共存する過渡期のため、STATUS.md が無い部下は今まで通り旧形式のファイルで判定する。
+status_state() {
+  [ -s "$1" ] || return 1
+  case "$(LC_ALL=C head -n1 "$1" 2>/dev/null)" in
+    "STATE: done")         printf 'done\n' ;;
+    "STATE: needs-answer") printf 'needs-answer\n' ;;
+    "STATE: in-progress")  printf 'in-progress\n' ;;
+    *) return 1 ;;
+  esac
+}
 [ -d "$MISSION" ] || die "mission ディレクトリが無い: $MISSION"
 ROSTER="$MISSION/roster.jsonl"
 [ -s "$ROSTER" ] || die "部下がいない: $ROSTER"
@@ -94,13 +106,36 @@ while IFS= read -r row; do
     pct=$(awk -v d="$tdone" -v t="$ttot" 'BEGIN{printf "%.3f", d/t}')
   fi
   [ -n "$pct" ] || pct=0
+  # STATUS.md（新形式）を先に見る。過渡期は無ければ旧形式の報告ファイルで判定する。
+  sst=""
+  [ -s "$WDIR/STATUS.md" ] && sst=$(status_state "$WDIR/STATUS.md")
   # 報告ファイルが出ているなら完了扱いにする（チェックリストの付け忘れより強い証拠）
-  { [ -s "$WDIR/REPORT.md" ] || [ -s "$WDIR/PLAN.md" ]; } && pct=1
+  { [ -s "$WDIR/REPORT.md" ] || [ -s "$WDIR/PLAN.md" ] || [ "$sst" = "done" ]; } && pct=1
   sum=$(awk -v s="$sum" -v p="$pct" 'BEGIN{print s+p}')
 
   # 状態: 報告ファイルが最も強い根拠。無ければ cmux の lane を見る
   lane=$(cmux workspace status --json --workspace "$ref" 2>/dev/null | jq -r '.effective // "unknown"')
-  if   [ -s "$WDIR/BLOCKED.md" ];  then
+  if [ -s "$WDIR/STATUS.md" ]; then
+    case "$sst" in
+      needs-answer)
+        state="❓ 確認待ち（司令官の回答待ち）$(stale_suffix "$WDIR/STATUS.md")"; n_attn=$((n_attn+1))
+        smt=$(stat -f '%m' "$WDIR/STATUS.md" 2>/dev/null || stat -c '%Y' "$WDIR/STATUS.md" 2>/dev/null)
+        if [ -n "${smt:-}" ]; then
+          smins=$(( ( $(date -u +%s) - smt ) / 60 ))
+          [ "$smins" -ge "$STALE_MIN" ] 2>/dev/null \
+            && must_see="${must_see}  ❓ 部下${no} ${name}: STATUS.md が ${smins}分 未回答のまま（needs-answer）"$'\n'
+        fi ;;
+      done)
+        state="✅ 報告あり（検収待ち）";        n_done=$((n_done+1))
+        must_see="${must_see}  ★ 部下${no} ${name}: STATUS.md が done。検収・撤収がまだ"$'\n' ;;
+      in-progress)
+        if LC_ALL=C grep -aqE 'pull/[0-9]+|#[0-9]+' "$WDIR/STATUS.md" 2>/dev/null
+          then state="👀 レビュー対応中"
+          else state="▶ 作業中"
+        fi ;;
+      *) state="⚠ STATUS.md の形式が不正（STATE: 行を確認）"; n_attn=$((n_attn+1)) ;;
+    esac
+  elif [ -s "$WDIR/BLOCKED.md" ];  then
     state="⛔ 行き詰まり（人間の判断待ち）$(stale_suffix "$WDIR/BLOCKED.md")"; n_attn=$((n_attn+1))
     bmt=$(stat -f '%m' "$WDIR/BLOCKED.md" 2>/dev/null || stat -c '%Y' "$WDIR/BLOCKED.md" 2>/dev/null)
     if [ -n "${bmt:-}" ]; then
@@ -144,7 +179,7 @@ while IFS= read -r row; do
   [ -n "$plabel" ] && lines="${lines}  ${plabel}"
   lines="${lines}"$'\n'
   [ "$ttot" -gt 0 ] 2>/dev/null && lines="${lines}     todo ${tdone}/${ttot}${tnext:+ — 次: $tnext}"$'\n'
-  if [ "$ttot" -ge "$TODO_OVERLOAD" ] 2>/dev/null && [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
+  if [ "$ttot" -ge "$TODO_OVERLOAD" ] 2>/dev/null && [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ] && [ "$sst" != "done" ]; then
     must_see="${must_see}  ⚠ 部下${no} ${name}: todo が ${ttot} 件に積み上がっている（積みすぎの疑い。新しい依頼は新しい部下へ）"$'\n'
   fi
   # 経過時間。agent hook を切っているので「手が空いた」通知が来ない。沈黙はここで気付く
@@ -155,7 +190,7 @@ while IFS= read -r row; do
     if [ -n "$s_epoch" ]; then
       mins=$(( ( $(date +%s) - s_epoch ) / 60 ))
       warn=""
-      if [ "$mins" -ge 45 ] && [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
+      if [ "$mins" -ge 45 ] && [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ] && [ "$sst" != "done" ]; then
         warn="   ← 45分以上 報告なし。画面を見る"
         must_see="${must_see}  ⚠ 部下${no} ${name}: 稼働中で ${mins}分 報告なし（画面を見る）"$'\n'
       fi

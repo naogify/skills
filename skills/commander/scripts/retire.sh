@@ -8,6 +8,18 @@ export CMUX_QUIET=1
 die() { printf '%s\n' "retire: $*" >&2; exit 1; }
 hold() { printf '撤収しない: %s\n' "$*" >&2; exit 3; }
 
+# 新形式（STATUS.md）の1行目から状態を読む。旧形式（REPORT/QUESTION/BLOCKED/PLAN.md）と
+# 共存する過渡期のため、STATUS.md が無い部下は今まで通り旧形式のファイルで判定する。
+status_state() {
+  [ -s "$1" ] || return 1
+  case "$(LC_ALL=C head -n1 "$1" 2>/dev/null)" in
+    "STATE: done")         printf 'done\n' ;;
+    "STATE: needs-answer") printf 'needs-answer\n' ;;
+    "STATE: in-progress")  printf 'in-progress\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 [ $# -ge 2 ] || die "usage: retire.sh <mission-dir> <no> [--force]"
 MISSION=$1; NO=$2; FORCE=${3:-}
 ROSTER="$MISSION/roster.jsonl"
@@ -95,36 +107,62 @@ if [ -z "$slug" ] && [ -n "$wt" ] && [ -d "$wt" ]; then
 fi
 
 if [ "$FORCE" != "--force" ]; then
-  if [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
-    # 報告（REPORT/PLAN）が無くても、PR.md に書かれた実物の PR が既にマージ / クローズ
-    # されていれば完了と見なす（司令官が部下を飛ばしてマージした場合や、部下が PR.md だけ
-    # 書いて止まった場合に REPORT.md は無い）。
-    #
-    # PR 番号は部下番号 ($NO) からではなく、必ず PR.md の実物から読む。
-    # 部下番号をそのまま PR 番号として使うと、無関係な既存 PR に衝突して「マージ済み」と
-    # 誤判定しうる（inbox.sh の片付け漏れ検知で一度踏んだのと同じ罠。SKILL.md の
-    # 「スクリプトを書き換えるときの規則」に載っている教訓だが、retire.sh には未反映だった。
-    # 実例: 部下43・44 が PR.md を書き、対応する PR（#29・#30）はマージ済みだったのに、
-    # この判定が効かず REPORT.md も PLAN.md も無いという理由だけで撤収を拒否し、
-    # 「作業を捨ててよい」ときのフラグである --force を使わざるを得なかった）。
-    prnum=""
-    prf="$WDIR/PR.md"
-    if [ -s "$prf" ]; then
-      prnum=$(LC_ALL=C grep -aoE 'pull/[0-9]+' "$prf" 2>/dev/null | head -1 | sed 's|pull/||')
-      [ -n "$prnum" ] || prnum=$(LC_ALL=C grep -aoE '#[0-9]+' "$prf" 2>/dev/null | head -1 | tr -d '#')
+  if [ -s "$WDIR/STATUS.md" ]; then
+    # ── 新形式: STATUS.md 1本。状態は1行目の STATE: で表す（上書きされるので消し忘れが起きない）──
+    sst=$(status_state "$WDIR/STATUS.md") || sst=""
+    case "$sst" in
+      done) : ;;  # 撤収してよい
+      needs-answer) hold "STATUS.md が needs-answer のまま（未回答）: $WDIR/STATUS.md" ;;
+      in-progress)
+        # in-progress でも、本文に書かれた実物の PR が既にマージ / クローズされていれば完了と見なす
+        # （PR.md の実物 PR 番号で確認する retire.sh の既存ルールを STATUS.md の本文にも適用する）。
+        prnum=$(LC_ALL=C grep -aoE 'pull/[0-9]+' "$WDIR/STATUS.md" 2>/dev/null | head -1 | sed 's|pull/||')
+        [ -n "$prnum" ] || prnum=$(LC_ALL=C grep -aoE '#[0-9]+' "$WDIR/STATUS.md" 2>/dev/null | head -1 | tr -d '#')
+        prstate=""
+        case "$prnum" in
+          ''|*[!0-9]*) : ;;
+          *) [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
+        esac
+        case "$prstate" in
+          MERGED|CLOSED) printf 'STATUS.md は in-progress のままだが PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
+          *) hold "STATUS.md が in-progress のまま、PR も未マージ（まだ終わっていない）: $WDIR/STATUS.md" ;;
+        esac
+        ;;
+      *) hold "STATUS.md の1行目が不正（STATE: done|needs-answer|in-progress を期待）: $WDIR/STATUS.md" ;;
+    esac
+  else
+    # ── 旧形式（REPORT/QUESTION/BLOCKED/PLAN/PR.md）。変更していない ──
+    if [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
+      # 報告（REPORT/PLAN）が無くても、PR.md に書かれた実物の PR が既にマージ / クローズ
+      # されていれば完了と見なす（司令官が部下を飛ばしてマージした場合や、部下が PR.md だけ
+      # 書いて止まった場合に REPORT.md は無い）。
+      #
+      # PR 番号は部下番号 ($NO) からではなく、必ず PR.md の実物から読む。
+      # 部下番号をそのまま PR 番号として使うと、無関係な既存 PR に衝突して「マージ済み」と
+      # 誤判定しうる（inbox.sh の片付け漏れ検知で一度踏んだのと同じ罠。SKILL.md の
+      # 「スクリプトを書き換えるときの規則」に載っている教訓だが、retire.sh には未反映だった。
+      # 実例: 部下43・44 が PR.md を書き、対応する PR（#29・#30）はマージ済みだったのに、
+      # この判定が効かず REPORT.md も PLAN.md も無いという理由だけで撤収を拒否し、
+      # 「作業を捨ててよい」ときのフラグである --force を使わざるを得なかった）。
+      prnum=""
+      prf="$WDIR/PR.md"
+      if [ -s "$prf" ]; then
+        prnum=$(LC_ALL=C grep -aoE 'pull/[0-9]+' "$prf" 2>/dev/null | head -1 | sed 's|pull/||')
+        [ -n "$prnum" ] || prnum=$(LC_ALL=C grep -aoE '#[0-9]+' "$prf" 2>/dev/null | head -1 | tr -d '#')
+      fi
+      prstate=""
+      case "$prnum" in
+        ''|*[!0-9]*) : ;;
+        *) [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
+      esac
+      case "$prstate" in
+        MERGED|CLOSED) printf 'REPORT.md は無いが PR.md に書かれた PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
+        *) hold "REPORT.md も PLAN.md も無く、PR.md の PR も未マージ（まだ終わっていない）: $WDIR" ;;
+      esac
     fi
-    prstate=""
-    case "$prnum" in
-      ''|*[!0-9]*) : ;;
-      *) [ -n "$slug" ] && prstate=$(gh pr view "$prnum" --repo "$slug" --json state --jq '.state' 2>/dev/null) ;;
-    esac
-    case "$prstate" in
-      MERGED|CLOSED) printf 'REPORT.md は無いが PR.md に書かれた PR #%s は %s なので完了と見なす\n' "$prnum" "$prstate" ;;
-      *) hold "REPORT.md も PLAN.md も無く、PR.md の PR も未マージ（まだ終わっていない）: $WDIR" ;;
-    esac
+    [ -s "$WDIR/QUESTION.md" ] && hold "QUESTION.md が残っている（未回答）: $WDIR/QUESTION.md"
+    [ -s "$WDIR/BLOCKED.md" ]  && hold "BLOCKED.md が残っている（人間の判断待ち）: $WDIR/BLOCKED.md"
   fi
-  [ -s "$WDIR/QUESTION.md" ] && hold "QUESTION.md が残っている（未回答）: $WDIR/QUESTION.md"
-  [ -s "$WDIR/BLOCKED.md" ]  && hold "BLOCKED.md が残っている（人間の判断待ち）: $WDIR/BLOCKED.md"
 
   if [ -n "$wt" ] && [ -d "$wt" ]; then
     dirty=$(git -C "$wt" status --porcelain 2>/dev/null)
@@ -235,7 +273,7 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$WDIR/RETIRED"
 # 「人間に未報告の完了」を毎回突き付けるので、報告漏れが構造的に起きない。
 # 成果物のダイジェストを作る。報告に必要な材料を台帳に焼き込む
 digest=""
-for f in REPORT PLAN POSTED; do
+for f in STATUS REPORT PLAN POSTED; do
   [ -s "$WDIR/$f.md" ] || continue
   concl=$(LC_ALL=C grep -a -A3 '^## 結論' "$WDIR/$f.md" 2>/dev/null | sed -n '2p' | cut -c1-100)
   [ -n "$concl" ] && digest="${digest}${concl} "

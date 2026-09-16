@@ -28,6 +28,18 @@ touch "$STALL_STATE" "$SILENCE_STATE" 2>/dev/null || true
 # コピペするだけで再武装できる正確な文字列をここで固定し、記憶に頼らせない。
 rearm_line() { printf 'REARM: bash "%s" "%s" %s %s\n' "$SELF" "$MISSION" "$MAX" "$IV"; }
 
+# 新形式（STATUS.md）の1行目から状態を読む。旧形式（REPORT/PLAN.md）と共存する過渡期のため、
+# STATUS.md が無い部下は今まで通り旧形式のファイルで判定する。
+status_state() {
+  [ -s "$1" ] || return 1
+  case "$(LC_ALL=C head -n1 "$1" 2>/dev/null)" in
+    "STATE: done")         printf 'done\n' ;;
+    "STATE: needs-answer") printf 'needs-answer\n' ;;
+    "STATE: in-progress")  printf 'in-progress\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 # 沈黙検知のバケット台帳（$SILENCE_STATE）の読み書き。「部下<TAB>最後に報告した60分区切り」を持つ。
 get_silence_bucket() { awk -F'\t' -v no="$1" '$1==no{print $2; exit}' "$SILENCE_STATE" 2>/dev/null; }
 put_silence_bucket() {
@@ -71,6 +83,7 @@ scan_waiting() {
     no=$(printf '%s' "$row" | jq -r '.no'); ref=$(printf '%s' "$row" | jq -r '.ws_ref')
     [ -f "$MISSION/workers/$no/RETIRED" ] && continue
     [ -s "$MISSION/workers/$no/REPORT.md" ] && continue
+    [ "$(status_state "$MISSION/workers/$no/STATUS.md" 2>/dev/null)" = "done" ] && continue
     scr=$(cmux read-screen --workspace "$ref" --lines 14 2>/dev/null)
     [ -n "$scr" ] || continue
     is_active "$scr" && continue
@@ -158,7 +171,8 @@ while :; do
     ep=$(TZ=UTC date -j -f '%Y-%m-%dT%H:%M:%SZ' "$st" +%s 2>/dev/null) || continue
     mins=$(( ( $(date +%s) - ep ) / 60 ))
     if [ "$mins" -ge 60 ] && [ ! -s "$MISSION/workers/$no/REPORT.md" ] \
-       && [ ! -s "$MISSION/workers/$no/PLAN.md" ]; then
+       && [ ! -s "$MISSION/workers/$no/PLAN.md" ] \
+       && [ "$(status_state "$MISSION/workers/$no/STATUS.md" 2>/dev/null)" != "done" ]; then
       bucket=$(( mins / 60 ))
       prev=$(get_silence_bucket "$no"); prev=${prev:-0}
       case "$prev" in ''|*[!0-9]*) prev=0 ;; esac

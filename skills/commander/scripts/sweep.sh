@@ -24,6 +24,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # COMMANDER_STALE_MIN で上書きできる。
 STALE_MIN=${COMMANDER_STALE_MIN:-30}
 
+# 新形式（STATUS.md）の1行目から状態を読む。旧形式（REPORT/QUESTION/BLOCKED.md）と
+# 共存する過渡期のため、STATUS.md が無い部下は今まで通り旧形式のファイルで判定する。
+status_state() {
+  [ -s "$1" ] || return 1
+  case "$(LC_ALL=C head -n1 "$1" 2>/dev/null)" in
+    "STATE: done")         printf 'done\n' ;;
+    "STATE: needs-answer") printf 'needs-answer\n' ;;
+    "STATE: in-progress")  printf 'in-progress\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 pending=0
 printf '=== sweep: %s ===\n' "$MISSION"
 
@@ -41,38 +53,61 @@ while IFS= read -r row; do
   [ -f "$WDIR/RETIRED" ] && continue
   active_count=$((active_count+1))
 
-  rep=""; que=""; blk=""
-  for f in REPORT QUESTION BLOCKED; do
-    p="$WDIR/$f.md"
-    [ -s "$p" ] || continue
-    mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$p" 2>/dev/null || stat -c '%y' "$p" 2>/dev/null | cut -c1-16)
-    mt_epoch=$(stat -f '%m' "$p" 2>/dev/null || stat -c '%Y' "$p" 2>/dev/null)
-    case "$f" in
-      REPORT)   rep="更新:${mt}" ;;
-      QUESTION) que="更新:${mt}"
-                if [ -n "${mt_epoch:-}" ]; then
-                  qmins=$(( (now_epoch - mt_epoch) / 60 ))
-                  if [ "$qmins" -ge "$STALE_MIN" ] 2>/dev/null; then
-                    stale="${stale}⚠ 部下${no} ${name}: QUESTION.md が ${qmins}分 未回答のまま放置されている（${mt}）\n"
-                  fi
-                fi ;;
-      BLOCKED)  blk="更新:${mt}"
-                if [ -n "${mt_epoch:-}" ]; then
-                  bmins=$(( (now_epoch - mt_epoch) / 60 ))
-                  if [ "$bmins" -ge "$STALE_MIN" ] 2>/dev/null; then
-                    stale="${stale}⚠ 部下${no} ${name}: BLOCKED.md が ${bmins}分 人間の判断待ちのまま放置されている（${mt}）\n"
-                  fi
-                fi ;;
+  rep=""; que=""; blk=""; sts=""
+  if [ -s "$WDIR/STATUS.md" ]; then
+    # ── 新形式: STATUS.md 1本 ──
+    mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$WDIR/STATUS.md" 2>/dev/null || stat -c '%y' "$WDIR/STATUS.md" 2>/dev/null | cut -c1-16)
+    mt_epoch=$(stat -f '%m' "$WDIR/STATUS.md" 2>/dev/null || stat -c '%Y' "$WDIR/STATUS.md" 2>/dev/null)
+    sst=$(status_state "$WDIR/STATUS.md") || sst="不正な形式"
+    sts="${sst} 更新:${mt}"
+    case "$sst" in
+      done) starred="${starred}★ 部下${no} ${name}: STATUS.md が done（${mt}）だが未撤収\n" ;;
+      needs-answer)
+        if [ -n "${mt_epoch:-}" ]; then
+          smins=$(( (now_epoch - mt_epoch) / 60 ))
+          if [ "$smins" -ge "$STALE_MIN" ] 2>/dev/null; then
+            stale="${stale}⚠ 部下${no} ${name}: STATUS.md が ${smins}分 未回答のまま放置されている（needs-answer, ${mt}）\n"
+          fi
+        fi ;;
     esac
-  done
+  else
+    # ── 旧形式（REPORT/QUESTION/BLOCKED.md）。変更していない ──
+    for f in REPORT QUESTION BLOCKED; do
+      p="$WDIR/$f.md"
+      [ -s "$p" ] || continue
+      mt=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$p" 2>/dev/null || stat -c '%y' "$p" 2>/dev/null | cut -c1-16)
+      mt_epoch=$(stat -f '%m' "$p" 2>/dev/null || stat -c '%Y' "$p" 2>/dev/null)
+      case "$f" in
+        REPORT)   rep="更新:${mt}" ;;
+        QUESTION) que="更新:${mt}"
+                  if [ -n "${mt_epoch:-}" ]; then
+                    qmins=$(( (now_epoch - mt_epoch) / 60 ))
+                    if [ "$qmins" -ge "$STALE_MIN" ] 2>/dev/null; then
+                      stale="${stale}⚠ 部下${no} ${name}: QUESTION.md が ${qmins}分 未回答のまま放置されている（${mt}）\n"
+                    fi
+                  fi ;;
+        BLOCKED)  blk="更新:${mt}"
+                  if [ -n "${mt_epoch:-}" ]; then
+                    bmins=$(( (now_epoch - mt_epoch) / 60 ))
+                    if [ "$bmins" -ge "$STALE_MIN" ] 2>/dev/null; then
+                      stale="${stale}⚠ 部下${no} ${name}: BLOCKED.md が ${bmins}分 人間の判断待ちのまま放置されている（${mt}）\n"
+                    fi
+                  fi ;;
+      esac
+    done
 
-  if [ -n "$rep" ]; then
-    starred="${starred}★ 部下${no} ${name}: REPORT.md あり（${rep}）だが未撤収\n"
+    if [ -n "$rep" ]; then
+      starred="${starred}★ 部下${no} ${name}: REPORT.md あり（${rep}）だが未撤収\n"
+    fi
   fi
   detail="${detail}部下${no} ${name}\n"
-  detail="${detail}  REPORT.md:   ${rep:-なし}\n"
-  detail="${detail}  QUESTION.md: ${que:-なし}\n"
-  detail="${detail}  BLOCKED.md:  ${blk:-なし}\n"
+  if [ -n "$sts" ]; then
+    detail="${detail}  STATUS.md:   ${sts}\n"
+  else
+    detail="${detail}  REPORT.md:   ${rep:-なし}\n"
+    detail="${detail}  QUESTION.md: ${que:-なし}\n"
+    detail="${detail}  BLOCKED.md:  ${blk:-なし}\n"
+  fi
 done < "$ROSTER"
 
 if [ -n "$starred" ]; then
@@ -131,7 +166,11 @@ if [ "$AUTO" = "--auto" ]; then
     no=$(printf '%s' "$row" | jq -r '.no')
     WDIR="$MISSION/workers/$no"
     [ -f "$WDIR/RETIRED" ] && continue
-    [ -s "$WDIR/REPORT.md" ] || continue
+    if [ -s "$WDIR/STATUS.md" ]; then
+      [ "$(status_state "$WDIR/STATUS.md")" = "done" ] || continue
+    else
+      [ -s "$WDIR/REPORT.md" ] || continue
+    fi
     printf '部下%s を検収する\n' "$no"
     if bash "$HERE/verify.sh" "$MISSION" "$no"; then
       printf '部下%s を撤収する\n' "$no"

@@ -78,7 +78,7 @@ mtime も変わっていなかった。原因は別ディレクトリのコピ�
 
 ## 設計判断に当たったら止まる
 
-以下に当たったら、自分で決めずに `QUESTION` を上げて**待機する**:
+以下に当たったら、自分で決めずに `STATUS.md` に `needs-answer` を書いて**待機する**:
 
 - 公開 API / レスポンス形式 / ステータスコード・エラーコードの選択と変更
 - 権限モデル（super-admin / owner / member）、テナント境界の扱い
@@ -98,13 +98,32 @@ mtime も変わっていなかった。原因は別ディレクトリのコピ�
 司令官との連絡は **2 つだけ**。これ以外の手段は使わない:
 
 1. **`cmux todo`**（チェックリスト）… 進捗の唯一の表明。司令官の盤面はここから進捗率を算出する
-2. **報告ファイル**（`REPORT.md` / `QUESTION.md` / `BLOCKED.md`）… 判断に使う中身。司令官はこれを読む
+2. **`STATUS.md`**（1本だけ。判断に使う中身）… 司令官はこれを読む
 
 **`cmux notify` と `cmux log` と `cmux set-progress` は使わないこと。**
 サイドバーに通知本文・ログ抜粋・進捗バーが積もって、人間が状況を読めなくなる
-（司令官は報告ファイルの出現を検知しているので、通知は不要）。
+（司令官は `STATUS.md` の出現・更新を検知しているので、通知は不要）。
 
 報告ディレクトリ: `<MISSION>/workers/<no>/`  ← このパスを使う
+
+## `STATUS.md` の形（状態はファイルの種類ではなく1行目で表す）
+
+`STATUS.md` は常に**この1本だけ**。状態が変わったら別ファイルを作らず、**同じファイルを
+`cat > ... <<'EOF'` で全文上書きする**（部分編集で継ぎ足さない）。旧回では
+`REPORT.md`/`QUESTION.md`/`BLOCKED.md` を都度作って消し忘れる事故が起きていたが、
+1本を上書きする形なら**古い状態が物理的に残らない**。
+
+1行目は必ず次のどれか（他の文字列は不正な形式として扱われる）:
+
+```
+STATE: done            ← 完了した。検収を待つ
+STATE: needs-answer    ← 判断が必要。司令官の回答を待つ
+STATE: in-progress     ← 作業中の途中経過（PRを出してレビュー待ちの間もこれ）
+```
+
+2行目以降は自由形式の本文。**PR を出したら、状態に関係なく本文のどこかに URL を書く**
+（例: `PR: https://github.com/<owner>/<repo>/pull/<n>`）。PR の有無は状態とは独立な
+成果物の情報であり、`STATE` の値を決めない。
 
 ## 1. 着手したら作業計画を todo に流す（進捗の実測値になる）
 
@@ -146,7 +165,8 @@ N
 ## 2. 判断待ちで止まるとき
 
 ```bash
-cat > '<MISSION>/workers/<no>/QUESTION.md' <<'Q'
+cat > '<MISSION>/workers/<no>/STATUS.md' <<'S'
+STATE: needs-answer
 ## 論点
 <何を決める必要があるか>
 ## 選択肢
@@ -156,16 +176,18 @@ cat > '<MISSION>/workers/<no>/QUESTION.md' <<'Q'
 <どちらを推すか、なぜか>
 ## 分かっている事実
 <コード上の根拠。ファイル:行>
-Q
+S
 cmux workspace status set needs-attention   # サイドバーのレーンが「確認待ち」になる
 ```
 
-送ったら**セッションを終了せずその場で待機する**。答えが来たら `QUESTION.md` を削除して再開する。
+送ったら**セッションを終了せずその場で待機する**。答えが来たら `STATUS.md` を
+`STATE: in-progress` で上書きして再開する（削除ではなく上書き。ファイルは常に1本）。
 
 ## 3. 完了したとき
 
 ```bash
-cat > '<MISSION>/workers/<no>/REPORT.md' <<'R'
+cat > '<MISSION>/workers/<no>/STATUS.md' <<'S'
+STATE: done
 ## 結論
 <3行以内。何をして、どうなったか>
 ## 特定した原因 / 調べた結果
@@ -186,15 +208,15 @@ cat > '<MISSION>/workers/<no>/REPORT.md' <<'R'
 <コマンドと合否。回していないものは「未実行」と明記>
 ## スコープ外にしたもの / 別 issue 候補 / 迷った判断
 <あれば>
-R
+S
 cmux todo check <最後の項目>                 # チェックリストを全部 checked にする
 cmux workspace status set review            # サイドバーのレーンが「レビュー」になる
 ```
 
 <コードを書くタスクの場合>
-**commit までやって push はしない。** REPORT.md を書いたら**その場で待機**し、
+**commit までやって push はしない。** `STATE: done` の `STATUS.md` を書いたら**その場で待機**し、
 司令官から「push して PR を作れ」の指示が来てから進む。
-PR を作ったら PR 番号と URL を `<MISSION>/workers/<no>/PR.md` に書き、
+PR を作ったら状態を `STATE: in-progress` に戻し、本文に `PR: <URL>` を追記する。
 ### CI とレビューの完了を待つのは**あなたの仕事**
 
 push したら、**ブロックするコマンドで待つ**:
@@ -221,7 +243,7 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$
 - CodeRabbit の指摘 → **スコープ内なら直す**。スコープ外・設計判断なら別 issue に切って返信する
 - 直したら push して**また `--watch` で待つ**。これを **CI 全緑かつ未解決スレッド 0 になるまで繰り返す**
 
-**そこまで到達してから `REPORT.md` を書いて止まる。** 司令官が待っているのは
+**そこまで到達してから `STATUS.md` を `STATE: done` で上書きして止まる。** 司令官が待っているのは
 「CI が緑になったか」ではなく**あなたの報告**である。
 
 ### マージも「あなたの仕事」（ただし指示が来たときだけ）
@@ -235,7 +257,7 @@ gh pr merge <n> --repo <owner/repo> --merge --delete-branch   # squash は使わ
 gh pr view <n> --repo <owner/repo> --json state,mergedAt,mergeCommit   # 実際にマージされたか確認
 ```
 
-マージできたら **`REPORT.md` にマージコミットの SHA を追記して止まる**。
+マージできたら **`STATUS.md`（`STATE: done` のまま）にマージコミットの SHA を追記して止まる**。
 これが司令官の撤収の引き金になる。**追記を忘れると、あなたのワークスペースが片付かない。**
 
 **指示が来ていないのにマージしてはならない。** 検収前のマージは、穴が開いたままの変更を
@@ -244,11 +266,12 @@ gh pr view <n> --repo <owner/repo> --json state,mergedAt,mergeCommit   # 実際�
 ## 4. 自力で進めないとき
 
 ```bash
-cat > '<MISSION>/workers/<no>/BLOCKED.md' <<'B'
+cat > '<MISSION>/workers/<no>/STATUS.md' <<'S'
+STATE: needs-answer
 ## 何ができないか
 ## 試したこと（コマンドと結果）
 ## 何があれば進めるか
-B
+S
 cmux workspace status set needs-attention
 ```
 
@@ -259,5 +282,5 @@ cmux workspace status set needs-attention
 このワークスペースの入力欄に司令官がテキストを流し込む。受け取ったら:
 
 - 内容に従って再開する
-- `QUESTION.md` / `BLOCKED.md` を削除する（未解決の目印を残さない）
+- `STATUS.md` を `STATE: in-progress` で上書きする（未解決の目印を残さない。削除ではなく上書き）
 - チェックリストを新しい段取りに更新する（司令官はこれで「指示が届いて再開した」ことを確認する）

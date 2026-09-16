@@ -72,8 +72,9 @@ npm test                            # 触ったファイルだけでは足りな
 ```
 
 - **落ちたら、その 1 本を戻す**: `git reset --hard HEAD~1`（このマージだけ取り消す）
-  → `BLOCKED.md` ではなく `REPORT.md` に「PR #N は統合で落ちたので戻した。原因は〜」と書き、
-  **司令官に差し戻しを要求する**。**統合ブランチを壊れたまま先へ進めない**
+  → `STATUS.md` は `STATE: needs-answer` ではなく `STATE: done` のまま
+  「PR #N は統合で落ちたので戻した。原因は〜」と書き、**司令官に差し戻しを要求する**。
+  **統合ブランチを壊れたまま先へ進めない**
 - 通ったら push:
 
 ```bash
@@ -146,9 +147,12 @@ gh pr create --repo <owner/repo> --base <base> --head <統合ブランチ名> \
 連絡は **2 つだけ**（`cmux notify` / `cmux log` / `cmux set-progress` は使わない）:
 
 1. **`cmux todo`**（チェックリスト）… 進捗の唯一の表明
-2. **報告ファイル**（`REPORT.md` / `QUESTION.md` / `BLOCKED.md`）
+2. **`STATUS.md`**（1本だけ。判断に使う中身）
 
 報告ディレクトリ: `<MISSION>/workers/<no>/`  ← このパスを使う
+
+`STATUS.md` は1行目に `STATE: done` / `STATE: needs-answer` / `STATE: in-progress` のいずれかを書き、
+2行目以降に自由形式の本文を書く。状態が変わっても別ファイルを作らず、**同じファイルを全文上書きする**。
 
 ## 着手したら
 
@@ -159,9 +163,9 @@ printf '%s\n' '[{"text":"統合ブランチ作成","state":"in-progress"},{"text
 **1 本取り込むごとにチェックリストに項目を足していく**（`PR #350 統合` のように短く）。
 これが司令官と人間から見える唯一の進捗。**実際に終わった項目だけ check する。**
 
-## 1 本取り込むたびに REPORT.md を更新する（**部分編集ではなく Write で全文置換**）
+## 1 本取り込むたびに STATUS.md を更新する（**部分編集ではなく Write で全文置換**）
 
-**REPORT.md は毎回「現時点の全体像」を 1 から書き直して全文上書きしてください。**
+**STATUS.md は毎回「現時点の全体像」を 1 から書き直して全文上書きしてください。**
 既存の記述に追記・部分編集（Edit / Update）を重ねる形で継ぎ足さないこと。
 
 理由: あなたは取り込むたびに同じファイルを更新する役なので、部分編集を積み重ねると
@@ -170,10 +174,11 @@ printf '%s\n' '[{"text":"統合ブランチ作成","state":"in-progress"},{"text
 古いまま止まりました**（司令官から見ると「停止している」と区別が付きません）。
 毎回全文を書き直すほうが速く、壊れません。
 
-`<MISSION>/workers/<no>/REPORT.md` に以下の節を必ず入れる（**節名を変えない**。
+`<MISSION>/workers/<no>/STATUS.md` に以下の節を必ず入れる（**節名を変えない**。
 司令官が機械で検収する）:
 
 ```
+STATE: done
 ## 結論
 <統合ブランチに何本入っているか / 統合 PR の番号 / 現在の CI 状態>
 ## 取り込んだブランチ
@@ -190,6 +195,8 @@ printf '%s\n' '[{"text":"統合ブランチ作成","state":"in-progress"},{"text
 <統合で落ちて reset した PR があれば、番号と原因>
 ```
 
+**1本取り込むごとに `STATE: done` のまま更新する。** 統合作業は完了・未完了ではなく
+「取り込み済みの現況」を随時 done で示し続ける（司令官が検収・撤収の判断材料にする）。
 更新したら:
 
 ```bash
@@ -200,8 +207,9 @@ cmux workspace status set review
 
 ## 判断待ち・行き詰まり
 
-`<MISSION>/workers/<no>/QUESTION.md`（論点 / 選択肢 / 自分の推奨と理由 / 分かっている事実）または
-`<MISSION>/workers/<no>/BLOCKED.md`（何ができないか / 試したこと / 何があれば進めるか）を書き、
+`<MISSION>/workers/<no>/STATUS.md` を `STATE: needs-answer` で上書きし
+（論点 / 選択肢 / 自分の推奨と理由 / 分かっている事実、または
+何ができないか / 試したこと / 何があれば進めるか）、
 
 ```bash
 cmux workspace status set needs-attention
@@ -212,5 +220,5 @@ cmux workspace status set needs-attention
 ## 司令官から指示が来たとき
 
 入力欄に司令官がテキストを流し込む。受け取ったら内容に従って再開し、
-`QUESTION.md` / `BLOCKED.md` を削除し、チェックリストを更新する
+`STATUS.md` を `STATE: in-progress` で上書きし、チェックリストを更新する
 （司令官はこれで「指示が届いて再開した」ことを確認する）。

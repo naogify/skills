@@ -31,6 +31,18 @@ trap 'rm -f "$NEW_STATE"' EXIT
 get_state() { awk -F'\t' -v k="$1" '$1==k{print $2; exit}' "$STATE"; }
 put_state() { printf '%s\t%s\n' "$1" "$2" >> "$NEW_STATE"; }
 
+# 新形式（STATUS.md）の1行目から状態を読む。旧形式（REPORT/QUESTION/BLOCKED/PLAN/PR.md）と
+# 共存する過渡期のため、STATUS.md が無い部下は今まで通り旧形式のファイルで判定する。
+status_state() {
+  [ -s "$1" ] || return 1
+  case "$(LC_ALL=C head -n1 "$1" 2>/dev/null)" in
+    "STATE: done")         printf 'done\n' ;;
+    "STATE: needs-answer") printf 'needs-answer\n' ;;
+    "STATE: in-progress")  printf 'in-progress\n' ;;
+    *) return 1 ;;
+  esac
+}
+
 NOTES=$(cmux list-notifications --json 2>/dev/null) || NOTES='[]'
 out=""
 
@@ -41,11 +53,15 @@ while IFS= read -r row; do
   [ -n "$row" ] || continue
   no=$(printf '%s' "$row" | jq -r '.no'); rp=$(printf '%s' "$row" | jq -r '.repo // ""')
   [ -f "$MISSION/workers/$no/RETIRED" ] && continue
-  # PR番号は workers/<no>/PR.md の実物から読む。部下番号をそのままPR番号として使うと、
-  # 無関係な既存PR（例: 部下8 → 別件でマージ済みの PR #8）に衝突して「マージ済み」と
-  # 誤検知し、作業中の部下を撤収＝worktreeごと破棄させかねない（実際に誤報が出た）。
+  # PR番号は workers/<no>/PR.md（新形式では STATUS.md 本文）の実物から読む。部下番号を
+  # そのままPR番号として使うと、無関係な既存PR（例: 部下8 → 別件でマージ済みの PR #8）に
+  # 衝突して「マージ済み」と誤検知し、作業中の部下を撤収＝worktreeごと破棄させかねない
+  # （実際に誤報が出た）。
   prf="$MISSION/workers/$no/PR.md"
-  [ -f "$prf" ] || continue
+  if [ ! -f "$prf" ]; then
+    prf="$MISSION/workers/$no/STATUS.md"
+    [ -f "$prf" ] || continue
+  fi
   prnum=$(LC_ALL=C grep -aoE 'pull/[0-9]+' "$prf" 2>/dev/null | head -1 | sed 's|pull/||')
   [ -n "$prnum" ] || prnum=$(LC_ALL=C grep -aoE '#[0-9]+' "$prf" 2>/dev/null | head -1 | tr -d '#')
   case "$prnum" in ''|*[!0-9]*) continue ;; esac
@@ -115,7 +131,25 @@ while IFS= read -r row; do
   fi
   put_state "$key" "$lcount"
 
-  # 2. 報告ファイル（判断に使う中身。新規・更新だけ出す）
+  # 2a. 新形式（STATUS.md 1本。状態は1行目の STATE: で表す。過渡期は旧形式と共存する）
+  sp="$WDIR/STATUS.md"
+  if [ -s "$sp" ]; then
+    sfp=$(stat -f '%z:%m' "$sp" 2>/dev/null || stat -c '%s:%Y' "$sp" 2>/dev/null)
+    skey="$no|file:STATUS"
+    if [ "$(get_state "$skey")" != "$sfp" ]; then
+      sst=$(status_state "$sp") || sst=""
+      case "$sst" in
+        done)         buf="${buf}  ✅ STATUS: done（検収する）: ${sp}"$'\n' ;;
+        needs-answer) buf="${buf}  ❓ STATUS: needs-answer（回答が必要）: ${sp}"$'\n' ;;
+        in-progress)  buf="${buf}  ▶ STATUS: in-progress（更新あり）: ${sp}"$'\n' ;;
+        *)            buf="${buf}  ⚠ STATUS.md の1行目が不正（STATE: done|needs-answer|in-progress を期待）: ${sp}"$'\n' ;;
+      esac
+      buf="${buf}$(sed -n '2,8p' "$sp" | sed 's/^/       /')"$'\n'
+    fi
+    put_state "$skey" "$sfp"
+  fi
+
+  # 2b. 旧形式（判断に使う中身。新規・更新だけ出す）
   for f in BLOCKED QUESTION PLAN REPORT PR; do
     p="$WDIR/$f.md"
     [ -s "$p" ] || continue
