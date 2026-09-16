@@ -1046,6 +1046,20 @@ else
   sed 's/^/      /' "$out18c"
 fi
 
+# 6z-2) 部下86 の新規検査: report-watch.sh は STATUS.md（新形式）も catch-up で検知するか。
+#      is_report_file() / find_report_files() の対象一覧に STATUS.md を足したので、
+#      抜けているとこの常駐監視だけが新形式の報告を一生検知しないままになる。
+g18d="$SANDBOX/g18d"; mkdir -p "$g18d/workers/9"
+printf 'STATE: done\n## 結論\nテスト\n' > "$g18d/workers/9/STATUS.md"
+out18d="$g18d/out.log"
+timeout 3 bash "$D/report-watch.sh" "$g18d" > "$out18d" 2>/dev/null
+if grep -q '部下9 STATUS: STATE: done' "$out18d"; then
+  ok '部下86 新規検査: report-watch.sh は STATUS.md（新形式）も catch-up で検知する'
+else
+  bad '部下86 の退行: report-watch.sh が STATUS.md（新形式）を検知しない'
+  sed 's/^/      /' "$out18d"
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
@@ -1169,7 +1183,7 @@ mission="$g22/mission"
   jq -nc '{no:"1",name:"g22-done"}'
   jq -nc '{no:"2",name:"g22-needs-answer"}'
 } > "$mission/roster.jsonl"
-printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n' > "$mission/workers/1/STATUS.md"
+printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n## 検証（コマンドと出力）\n実行して確認した\n' > "$mission/workers/1/STATUS.md"
 printf 'STATE: needs-answer\n## 論点\nテスト\n' > "$mission/workers/2/STATUS.md"
 verify22a=$(bash "$D/verify.sh" "$mission" 1 2>&1); rc22a=$?
 verify22b=$(bash "$D/verify.sh" "$mission" 2 2>&1); rc22b=$?
