@@ -6,6 +6,13 @@
 #  ここで渡した文字列をパスとして使うことはない）。
 # 事前に <mission>/workers/<no>/PROMPT.md を書いておくこと。
 # 起動できたら "OK workspace:<N>" と ref を出し、roster.jsonl に 1 行追記する。
+#
+# roster.jsonl への追記は「起動が本当に成立したか」を確認する前に行う。ワークスペース自体は
+# 作られている（cmux 上に存在する）以上、retire.sh / board.sh から見えないと片付けられない
+# ままになるため（roster に無いワークスペースは retire.sh が扱えない）。
+# 起動確認に失敗した場合（信頼ダイアログで止まった・タイムアウトした）は roster には残したまま
+# 終了コード 1 で失敗させ、<mission>/workers/<no>/SPAWN_FAILED に理由を書く。
+# 「OK」が出た行だけが起動成功の証拠。
 set -uo pipefail
 export CMUX_QUIET=1
 
@@ -106,20 +113,35 @@ jq -e --arg no "$NO" 'select((.no|tostring)==$no)' "$MISSION/roster.jsonl" >/dev
 # 進捗バーもログも出さない。サイドバーに出るのは
 # タイトル / 説明 / チェックリスト / パス / agent hook の Needs input ピル だけにする
 
-# 起動直後に出うる罠を自動で通す。1 ターンで両方出ることがあるので、
+# 起動直後に出うる罠を検出する。1 ターンで両方出ることがあるので、
 # 「走り始めた」と確認できるまでループを続ける（片方を処理したら break で抜けない）。
 #
-# 罠 1: 新しいディレクトリでは "Do you trust this folder?" で止まる → Enter で通る。
+# 罠 1: 新しいディレクトリでは信頼ダイアログで止まる。
+#   **これは自動で通さない。** 「pre-approves N tool permissions」の警告付き変種
+#   （worktree に .claude/settings.local.json がある場合に出る。実例:
+#     ⚠ This folder pre-approves 69 tool permissions in .claude/settings.local.json
+#     ❯ No, exit
+#       Yes, I trust this folder
+#   ）はカーソルの既定位置が `No, exit` で、単純に Enter を送ると
+#   「Yes, I trust this folder」ではなく「No, exit」が選ばれてセッションが即終了する
+#   （実際に起きた事故。部下は一度も動かないまま、97分後に気付かれた。しかも残った
+#    bash プロンプトに対して send.sh の旧い判定（入力欄が空かどうかしか見ない）が
+#    「届いた」と誤報し続けた。send.sh 側の対策は別途 verify_claude_present で入れてある）。
+#   信頼ダイアログの変種ごとに既定カーソル位置を確実に判別する手段が無いため、
+#   検出したら自動応答せず起動失敗として扱う（安全側に倒す。無条件の自動承認は
+#   任意のディレクトリの .claude/settings.local.json の権限を黙って有効化しうるため避ける）。
 # 罠 2: `--dangerously-skip-permissions` を付けると実際に出るのは
 #   "Bypass Permissions" の 2 択（"1. No, exit" / "2. Yes, I accept"）であって
 #   "trust this folder" ではない。既定で `1. No, exit` にカーソルが乗っているため、
 #   Enter だけ送ると **部下が即死する**（実際に起きた）。down → Enter で
-#   `2. Yes, I accept` を選ぶ必要がある。
+#   `2. Yes, I accept` を選ぶ必要がある（こちらは変種が無く、安全に自動化できる）。
+launched=0
+blocked=""
 for _ in 1 2 3 4 5 6 7 8; do
   sleep 3
   scr=$(cmux read-screen --workspace "$ref" --lines 20 2>/dev/null)
   case "$scr" in
-    *"esc to interrupt"*|*"Bypassing Permissions"*) break ;;  # 既に起動して走っている
+    *"esc to interrupt"*|*"Bypassing Permissions"*) launched=1; break ;;  # 既に起動して走っている
   esac
   case "$scr" in
     *"No, exit"*"Yes, I accept"*|*"Bypass Permissions mode"*)
@@ -129,10 +151,33 @@ for _ in 1 2 3 4 5 6 7 8; do
   esac
   case "$scr" in
     *"trust this folder"*)
-      cmux send-key --workspace "$ref" enter >/dev/null 2>&1
-      continue ;;
+      # 自動応答しない（罠1参照）。誤ったキーを送るより、ここで止めて人間に委ねる方が安全。
+      blocked="trust_dialog"
+      break ;;
   esac
 done
+
+if [ "$launched" != 1 ]; then
+  reason=${blocked:-timeout}
+  {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+    printf '理由: %s\n' "$reason"
+    printf '画面:\n%s\n' "$scr"
+  } > "$WDIR/SPAWN_FAILED"
+  printf 'spawn: 部下%s %s（%s）: 起動確認に失敗した（理由: %s）。roster には追記済みだが Claude が走っている確証が無い\n' \
+    "$NO" "$NAME" "$ref" "$reason" >&2
+  case "$reason" in
+    trust_dialog)
+      printf '        信頼ダイアログで止まっている可能性が高い。cmux read-screen --workspace %s --lines 20 で画面を確認し、\n' "$ref" >&2
+      printf '        本当に信頼してよいディレクトリだと人間が判断したら手動で応答してから、再度この起動確認を行うこと\n' >&2
+      printf '        （自動応答はしない。既定カーソルを誤って選ぶとセッションが即終了するため）\n' >&2
+      ;;
+    *)
+      printf '        %s 秒待っても起動を確認できなかった。cmux read-screen --workspace %s --lines 20 で画面を確認すること\n' "$((8*3))" "$ref" >&2
+      ;;
+  esac
+  exit 1
+fi
 
 printf 'OK %s  %s\n' "$ref" "$NAME"
 printf 'ヒント: cmux read-screen --workspace %s --lines 20 で claude の起動を確認する\n' "$ref"

@@ -261,13 +261,15 @@ else
   ok 'verify.sh は UUID の断片を commit ハッシュ候補として拾わない（verify.sh を実行して確認）'
 fi
 
-# 6k) 構造検査: spawn.sh が「trust this folder」と「Bypass Permissions」の両方を処理しているか。
+# 6k) 構造検査: spawn.sh が「trust this folder」と「Bypass Permissions」の両方を検出しているか。
 #     Bypass Permissions は Enter だけだと既定の "1. No, exit" が選ばれて部下が即死する
 #     （実際に起きた）ので、down → enter を送っているかまで見る。
+#     trust this folder 側は自動応答しない（別の変種で "No, exit" が既定になっており、
+#     Enter だけ送ると同じく部下が即死する事故が起きたため。6ag/6ah で挙動を検証する）。
 if grep -q 'trust this folder' "$D/spawn.sh" \
    && grep -qE 'No, exit.*Yes, I accept|Bypass Permissions mode' "$D/spawn.sh" \
    && grep -q 'send-key --workspace "\$ref" down' "$D/spawn.sh"; then
-  ok 'spawn.sh は trust-folder と Bypass Permissions の両方を自動で通す'
+  ok 'spawn.sh は trust-folder を検出し、Bypass Permissions は自動で（down→enter で）通す'
 else
   bad 'spawn.sh が Bypass Permissions（down→enter）を処理していない（Enter だけだと部下が即死する）'
 fi
@@ -845,6 +847,9 @@ chmod +x "$g17/bin/cmux"
 # 呼び出しごとに screens/<サブディレクトリ> を用意してから呼ぶこと
 # （このヘルパー自体は screens を作り直さない。呼び出し回数をまたいだ状態を
 #  screen.1, screen.2, ... / フォールバックの screen.last で表現する）
+# 【注意】send.sh は送信前にも read-screen を1回呼ぶ（verify_claude_present の事前チェック。
+#  今回のバグ修正で追加）。そのため screen.1 は常に「送信前チェック用の画面」になり、
+#  試行1回目に読まれるのは screen.2 になる（番号が1つずれる）。
 run17() {
   local scrsub="$1"; shift
   : > "$g17/counter"
@@ -864,7 +869,8 @@ fi
 
 # 6y-2) 対照検査: Enter が押されず ❯ の直後に本文が残ったままなら再送が走る
 scrsub="stuck"; mkdir -p "$g17/screens/$scrsub"
-printf '❯ 送信予定のテキストが残ったままの画面\n' > "$g17/screens/$scrsub/screen.1"
+printf '❯ \n' > "$g17/screens/$scrsub/screen.1"   # 送信前チェック（Claude 存在確認）
+printf '❯ 送信予定のテキストが残ったままの画面\n' > "$g17/screens/$scrsub/screen.2"
 printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
 out17b=$(run17 "$scrsub" "送信予定のテキストが残ったままの画面")
 if printf '%s' "$out17b" | grep -q '再試行する' && printf '%s' "$out17b" | grep -q '試行2回'; then
@@ -877,7 +883,8 @@ fi
 # 6y-3) 本丸の退行検査: 入力欄（❯ の行）は空に見えても、送った本文の断片が
 #     ❯ の付かない行として画面のどこかに残っていれば「未送信」として再送する
 scrsub="residue"; mkdir -p "$g17/screens/$scrsub"
-printf '❯ \n  original message body twenty four chars continued here\n' > "$g17/screens/$scrsub/screen.1"
+printf '❯ \n' > "$g17/screens/$scrsub/screen.1"   # 送信前チェック（Claude 存在確認）
+printf '❯ \n  original message body twenty four chars continued here\n' > "$g17/screens/$scrsub/screen.2"
 printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
 out17c=$(run17 "$scrsub" "original message body twenty four chars continued here")
 if printf '%s' "$out17c" | grep -q '再試行する' && printf '%s' "$out17c" | grep -q '^OK ' \
@@ -887,6 +894,71 @@ else
   bad '送信済み誤判定の退行: 入力欄が空に見えるだけで、本文の断片が画面に残ったままなのに成功と誤判定している'
   printf '%s\n' "$out17c" | sed 's/^/      /'
 fi
+
+# 6y-4) 本丸の退行検査（今回の事故そのもの）: 画面が bash プロンプトだけ（Claude の UI が無い）
+#     状態で send.sh を呼んでも、絶対に「届いた」と報告してはいけない。
+#     実際の事故: spawn.sh が信頼ダイアログで既定の "No, exit" を選んでセッションが即終了し、
+#     bash プロンプトだけが残った状態に send.sh が2回とも「届いた（入力欄が空になった）」と
+#     誤って報告した。部下は一度も動いておらず、97分後に司令官が画面を見て初めて気付いた。
+scrsub="bashonly"; mkdir -p "$g17/screens/$scrsub"
+printf 'bash-3.2$ \n' > "$g17/screens/$scrsub/screen.last"
+out17d=$(run17 "$scrsub" "こんにちは、作業をお願いします"); rc17d=$?
+if [ "$rc17d" = "3" ] && ! printf '%s' "$out17d" | grep -q '^OK ' \
+   && printf '%s' "$out17d" | grep -q '見当たらない'; then
+  ok '送信ラッパー本丸の退行検査: bash プロンプトだけの画面には「届いた」と報告しない（今回の事故そのもの）'
+else
+  bad '本丸の退行: bash プロンプトだけの画面なのに「届いた」と報告してしまう（今回の事故が再発する）'
+  printf '      rc=%s\n' "$rc17d"
+  printf '%s\n' "$out17d" | sed 's/^/      /'
+fi
+
+# 6y-5) 対照検査: bash プロンプトだけの画面では cmux send 自体を一切呼ばない。
+#     実際に起きた副作用: 本文中の `> あと feature.id に...` という引用行がシェルの
+#     リダイレクトとして解釈され、worktree に空ファイル（`あと` `feature.id` 等）が作られた。
+#     「送ってから気付く」のではなく、送信前チェックで弾いて cmux send 自体を呼ばないことを確認する。
+SEND_LOG="$g17/send-called.log"; : > "$SEND_LOG"
+cat > "$g17/bin/cmux" <<CMUXSTUB
+#!/usr/bin/env bash
+case "\$1" in
+  send) printf '%s\n' "\$*" >> "$SEND_LOG"; exit 0 ;;
+  send-key) exit 0 ;;
+  read-screen)
+    n=\$(( \$(cat "\$COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "\$n" > "\$COUNTER_FILE"
+    f="\$SCREEN_DIR/screen.\$n"
+    [ -f "\$f" ] || f="\$SCREEN_DIR/screen.last"
+    cat "\$f" 2>/dev/null
+    exit 0
+    ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
+run17 "bashonly" '> あと feature.id に追記して' >/dev/null 2>&1
+if [ ! -s "$SEND_LOG" ]; then
+  ok '対照検査: bash プロンプトだけの画面では cmux send 自体を呼ばない（誤動作の実害を防ぐ）'
+else
+  bad '対照検査の退行: bash プロンプトだけなのに cmux send を呼んでしまっている（本文がシェルに食われる実害が起きる）'
+  sed 's/^/      /' "$SEND_LOG"
+fi
+# 以降のテスト用に cmux スタブを元に戻す
+cat > "$g17/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  send) exit 0 ;;
+  send-key) exit 0 ;;
+  read-screen)
+    n=$(( $(cat "$COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > "$COUNTER_FILE"
+    f="$SCREEN_DIR/screen.$n"
+    [ -f "$f" ] || f="$SCREEN_DIR/screen.last"
+    cat "$f" 2>/dev/null
+    exit 0
+    ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
 
 # 6ab) 構造検査: 部下テンプレの REPORT 節に「検証（コマンドと出力）」の枠があるか。
 #     事故: 部下が3回連続で「sprite を差し込み、動作確認済み」と報告したが、配信物
@@ -959,6 +1031,81 @@ if [ "$rc20" != "0" ] && printf '%s' "$out20" | grep -q '検証'; then
 else
   bad '事故8 の二次防止が退行: spawn.sh が検証の節無しの PROMPT.md を通してしまう'
   printf '%s\n' "$out20" | sed 's/^/      /' | head -6
+fi
+
+# 6ag) 本丸の退行検査（今回の事故の起点）: 信頼ダイアログ（`.claude/settings.local.json` の
+#     権限プレ承認つき変種。既定カーソルが `No, exit`）が出ている画面を、spawn.sh が
+#     起動成功として扱わないこと。
+#     実際の事故: このダイアログを spawn.sh が Enter だけで自動的に通そうとした結果
+#     「No, exit」が選ばれてセッションが即終了し、bash プロンプトだけが残った。
+#     部下は一度も動かないまま、司令官はそれに気付かず送信を2回試みた。
+G21="$SANDBOX/g21spawn"; mkdir -p "$G21/bin" "$G21/mission/workers/1" "$G21/mission/workers/2" "$G21/cwd"
+printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディレクトリ: %s/mission/workers/1/\n' "$G21" \
+  > "$G21/mission/workers/1/PROMPT.md"
+printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディレクトリ: %s/mission/workers/2/\n' "$G21" \
+  > "$G21/mission/workers/2/PROMPT.md"
+ws_list_g21="$G21/ws-list.json"
+jq -nc '{workspaces:[{id:"idT1",ref:"workspace:701"},{id:"idT2",ref:"workspace:702"}]}' > "$ws_list_g21"
+cat > "$G21/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "workspace list") cat "$WS_LIST_FILE" ;;
+  *)
+    case "$1" in
+      new-workspace) printf 'OK %s\n' "$NEW_WS_REF" ;;
+      read-screen)   cat "$SCREEN_FILE" 2>/dev/null ;;
+      send-key)      exit 0 ;;
+      *)             exit 0 ;;
+    esac ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$G21/bin/cmux"
+
+screen_trust="$G21/screen-trust.txt"
+cat > "$screen_trust" <<'SCREEN'
+ Accessing workspace:
+ /Users/naoppy/geolonia/smartcity-geospatial-platform-app/.worktrees/p4l-attachment-key
+
+ Quick safety check: Is this a project you created or one you trust? ...
+
+ ⚠ This folder pre-approves 69 tool permissions in .claude/settings.local.json:
+   WebSearch, mcp__playwright__browser_navigate, ...
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+SCREEN
+
+outSpawnA=$(PATH="$G21/bin:$PATH" WS_LIST_FILE="$ws_list_g21" NEW_WS_REF="workspace:701" SCREEN_FILE="$screen_trust" \
+  bash "$D/spawn.sh" "$G21/mission" 1 g21-trust desc "$G21/cwd" 2>&1)
+rcSpawnA=$?
+rowA=$(jq -c --arg no 1 'select((.no|tostring)==$no)' "$G21/mission/roster.jsonl" 2>/dev/null | tail -1)
+if [ "$rcSpawnA" != "0" ] && ! printf '%s' "$outSpawnA" | grep -q '^OK ' \
+   && [ -s "$G21/mission/workers/1/SPAWN_FAILED" ] && grep -q 'trust_dialog' "$G21/mission/workers/1/SPAWN_FAILED" \
+   && [ -n "$rowA" ]; then
+  ok '起動側の本丸退行検査: 信頼ダイアログ（権限プレ承認つき変種）を spawn.sh が起動成功として扱わない'
+else
+  bad '起動側の本丸退行: 信頼ダイアログが出ているのに spawn.sh が起動成功（OK）にしてしまう（今回の事故が再発する）'
+  printf '      rc=%s roster行=%s\n' "$rcSpawnA" "${rowA:-なし}"
+  printf '%s\n' "$outSpawnA" | sed 's/^/      /'
+fi
+
+# 6ah) 対照検査: 通常どおり起動できた場合（画面に "esc to interrupt" が出る）は
+#     従来どおり成功（OK・終了コード0・SPAWN_FAILED なし）になること
+screen_ok="$G21/screen-ok.txt"
+printf '✻ Cooking… (3s · esc to interrupt)\n' > "$screen_ok"
+outSpawnB=$(PATH="$G21/bin:$PATH" WS_LIST_FILE="$ws_list_g21" NEW_WS_REF="workspace:702" SCREEN_FILE="$screen_ok" \
+  bash "$D/spawn.sh" "$G21/mission" 2 g21-ok desc "$G21/cwd" 2>&1)
+rcSpawnB=$?
+if [ "$rcSpawnB" = "0" ] && printf '%s' "$outSpawnB" | grep -q '^OK ' \
+   && [ ! -e "$G21/mission/workers/2/SPAWN_FAILED" ]; then
+  ok '対照検査: 通常どおり起動できた場合は従来どおり成功（OK）になる（今回の修正で正常系を壊していない）'
+else
+  bad '対照検査の退行: 通常どおり起動できているのに spawn.sh が失敗扱いにしている'
+  printf '      rc=%s\n' "$rcSpawnB"
+  printf '%s\n' "$outSpawnB" | sed 's/^/      /'
 fi
 
 # 6z) report-watch.sh の退行検査: watch.sh の「1回発火したら死ぬ」を live reload 型（常駐 watcher）

@@ -1156,6 +1156,13 @@ MSG
 `send-key enter` を再試行し、既定回数（4回）試しても入力欄に本文が残っていればエラー終了する
 （司令官に画面を見させる）。**素の `cmux send` / `send-key` を手で組み合わせて送らない。**
 
+**事故: 部下が信頼ダイアログで即終了して bash プロンプトだけが残っていたのに、`send.sh` が
+2回とも「届いた」と報告した。** 入力欄が空かどうかしか見ていなかったため、bash プロンプトが
+打ち込んだ文字をコマンドとして実行して消費するのを「送信できた」と誤認した。これを塞ぐため、
+`send.sh` は送信前後で「画面に Claude の UI が実際に見えているか」も確認する。見えなければ
+**送信自体を行わず**（送ってしまうと本文がそのままシェルに食われる。実際に本文中の引用行が
+リダイレクトとして解釈され worktree に空ファイルが作られた）、終了コード 3 で失敗する。
+
 ### `cmux send` の本文にバッククォートを書くとコマンド置換される
 
 `cmux send --workspace ... "..."` のように**二重引用符の中でバッククォート**を書くと、
@@ -1175,14 +1182,36 @@ MSG
 差し戻し前と同じ head SHA のまま「全部緑です」と来たら、それは**指示が届いていない古い報告**。
 中身は一切見ずに無効化し、指示を届け直す。
 
-### 起動直後に出る罠は 2 種類ある。片方だけ通すと部下が即死する（実測）
+### 起動直後に出る罠は 2 種類ある。片方は自動で通せるが、もう片方は自動で通してはいけない（実測）
 
-`spawn.sh` が自動で両方処理するが、手で `cmux new-workspace` を叩いたときは自分でこれをやる。
+`spawn.sh` が起動確認をやるが、手で `cmux new-workspace` を叩いたときは自分でこれをやる。
 
-1. **`Do you trust this folder?`** — claude が初めて見るディレクトリで出る。作りたての
-   worktree は必ずこれに当たる。**Enter だけで通る。**
+1. **信頼ダイアログ（`Do you trust this folder?` 系）** — claude が初めて見るディレクトリで出る。
+   作りたての worktree は必ずこれに当たる。**このスキルでは自動応答しない。**
+   以前は「Enter だけで通る」と書いていたが、これは誤り。実際には
+   `.claude/settings.local.json` が権限を大量にプレ承認している worktree では、次のような
+   **既定カーソルが `No, exit`（拒否）側にある変種**が出る:
+   ```
+    Accessing workspace:
+    /path/to/.worktrees/xxx
+
+    Quick safety check: Is this a project you created or one you trust? ...
+
+    ⚠ This folder pre-approves 69 tool permissions in .claude/settings.local.json:
+      WebSearch, mcp__playwright__browser_navigate, ...
+
+    ❯ No, exit
+      Yes, I trust this folder
+
+    Enter to confirm · Esc to cancel
+   ```
+   ここで Enter だけ送ると「Yes, I trust this folder」ではなく **`No, exit` が選ばれて
+   部下が即終了する**（実際に起きた。しかも残った bash プロンプトに対して `send.sh` の
+   旧い判定が「届いた」と2回誤報し、部下が一度も動いていないことに97分間気付けなかった）。
+   変種ごとに既定カーソル位置を確実に判別する手段が無いため、**検出したら自動では
+   一切キーを送らず、人間が画面を見て判断してから手で答える**。
 2. **`Bypass Permissions` の 2 択** — `--dangerously-skip-permissions` を付けたときに
-   実際に出るのはこれで、`Do you trust this folder?` ではない:
+   実際に出るのはこれで、信頼ダイアログとは別物:
    ```
      WARNING: Claude Code running in Bypass Permissions mode
      ...
@@ -1192,10 +1221,11 @@ MSG
    ```
    既定でカーソルが `1. No, exit` に乗っている。**Enter だけ送ると `1. No, exit` が選ばれて
    部下が即死する**（実際に起きた。手順を信じて Enter だけ送っていたら 4 人とも死んでいた）。
-   **down → Enter** で `2. Yes, I accept` を選ぶ必要がある。
+   **down → Enter** で `2. Yes, I accept` を選ぶ必要がある。こちらは変種が無いので
+   `spawn.sh` が自動で処理してよい。
 
-起動直後の `read-screen` で検出し、出ている方に応じて送る（1 ターンで両方出ることもあるので
-どちらかを処理したら抜けない。`spawn.sh` の起動確認ループが両方を通すまでループするのはそのため）:
+起動直後の `read-screen` で検出する（1 ターンで両方出ることもあるので、`Bypass Permissions`
+を処理したらもう一度読み直す。`spawn.sh` の起動確認ループはこのためにある）:
 
 ```bash
 scr=$(CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 20)
@@ -1204,13 +1234,17 @@ case "$scr" in
     CMUX_QUIET=1 cmux send-key --workspace workspace:<N> down
     CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter ;;
   *"trust this folder"*)
-    CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter ;;
+    # 自動応答しない。画面を見て、本当に信頼してよいディレクトリか人間が判断してから答える
+    printf '信頼ダイアログで止まっている。手で確認すること: workspace:<N>\n' >&2 ;;
 esac
 ```
 
-**起動確認を省くと、4 人とも 1 文字も進まないまま「静かに待っている」状態になる**
-（`Bypass Permissions` を Enter だけで通した場合は「静かに待っている」ではなく**即終了する**）。
-Phase 4 の `read-screen` は飾りではない。
+**起動確認を省くと、部下が 1 文字も進まないまま「静かに待っている」状態になる**
+（`Bypass Permissions` を Enter だけで通した場合は「静かに待っている」ではなく**即終了する**。
+信頼ダイアログの権限プレ承認変種も同様に Enter だけで即終了しうる）。
+Phase 4 の `read-screen` は飾りではない。`spawn.sh` は起動確認に失敗すると `OK` を出さず
+終了コード 1 で失敗する（`workers/<no>/SPAWN_FAILED` に理由を残す。roster には残るので
+`retire.sh` で片付けられる）。**`spawn.sh` の "OK" 以外の出力を見たら、起動できていないと疑うこと。**
 
 ### 並列数を欲張らない
 
@@ -1273,12 +1307,15 @@ Phase 5「完了通知の本文は空っぽ」を参照。
 - `templates/integrator-prompt.md` — 統合担当への指令書テンプレ（複数 PR を 1 本の統合ブランチにまとめる役）
 - `scripts/mission-start.sh` — mission ディレクトリ + サイドバーのグループを作る
 - `scripts/preflight.sh` — 起動前の資源チェック（ディスク / スワップ / メモリ / worktree 数）
-- `scripts/spawn.sh` — 部下 1 人を起動して roster に記録する
+- `scripts/spawn.sh` — 部下 1 人を起動して roster に記録する。起動確認まで行い、信頼ダイアログ等で
+  止まっていたら `OK` を出さず終了コード 1 で失敗させる（`workers/<no>/SPAWN_FAILED` に理由を書く）
 - `scripts/inbox.sh` — 新しい報告だけを出す（`--peek` で待機ループの条件に使える）
 - `scripts/verify.sh` — 完了報告を機械的に検収する（人間の指示を待たずに回す。長時間残留サブエージェントの画面確認も含む）
 - `scripts/report-watch.sh` — 主役。報告ファイルの出現・更新を常駐監視し、動くたびに1行ずつ通知する（`Monitor` に `persistent: true` または `timeout_ms` 最大値で渡す。fswatch が無ければポーリングにフォールバック。`--catch-up` で仕掛ける前の分も出す）
 - `scripts/watch.sh` — 保険。fswatch も `Monitor` も使えない環境向けのフォールバック、および `report-watch.sh` には無い「待ち」検知・60分沈黙検知が要るときに単発で使う（動きが出るまで待って終了する。終了時に `REARM:` 行で張り直すコマンドを出す）
-- `scripts/send.sh` — 部下への指示送信ラッパー（`cmux send` → `send-key enter` → 入力欄が空になったか確認、を1コマンドにする）
+- `scripts/send.sh` — 部下への指示送信ラッパー（`cmux send` → `send-key enter` → 入力欄が空になったか確認、を1コマンドにする）。
+  送信前後に「画面に Claude の UI が実際に見えているか」も確認し、bash プロンプトだけ等で
+  Claude が居ないと判定したら送信せず終了コード 3 で失敗させる
 - `scripts/selftest.sh` — スクリプト自身の退行検査（**編集したら必ず回す**）
 - `scripts/board.sh` — 盤面（プログレスバー付き）を出す。先頭に「★ 今すぐ見るべきもの」banner を出す
 - `scripts/retire.sh` — 検証してからワークスペースと worktree を消す（危なければ止まる。`PR.md` の実物の PR がマージ済みなら REPORT.md が無くても撤収を許す）
