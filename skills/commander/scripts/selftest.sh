@@ -817,4 +817,44 @@ for f in "$D"/*.sh; do
 done
 ok '全スクリプトの構文チェック完了'
 
+# 8) 部下83 の退行検査: SKILL.md が「1人に積み増ししない」原則と例外・方針変更の出し方を明記しているか。
+#    実際の事故: 1人の部下に10件の依頼を積み、途中で方針変更を3回重ねた結果、依頼が直列に消化され、
+#    REPORT.md が最初の1件のぶんで止まって司令官が状況を見失った。
+if LC_ALL=C grep -aq '新しい依頼を、既存の部下に積み増ししない' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '同じ成果物' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq 'いまのタスクの差し替え' "$D/../SKILL.md" 2>/dev/null; then
+  ok 'SKILL.md は「積み増し禁止」の原則・例外・方針変更の出し方を明記している（部下83 の一次防止）'
+else
+  bad 'SKILL.md に「1人に積み増ししない」原則が無い（部下83 の再発防止が抜けている）'
+fi
+
+# 9) 部下83 の退行検査(board.sh): todo が積み上がった部下が「今すぐ見るべきもの」banner に出るか。
+g17="$SANDBOX/g17"; mkdir -p "$g17/bin"
+mission="$g17/mission"; mkdir -p "$mission/workers/1"
+ws_list_file="$g17/ws-list.json"
+jq -nc '{workspaces:[{id:"id1",ref:"workspace:401",current_directory:"",latest_conversation_message:""}]}' > "$ws_list_file"
+cat > "$g17/bin/cmux" <<CMUXSTUB
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "workspace list") cat "$ws_list_file" ;;
+  "workspace status") printf '{"effective":"working"}\n' ;;
+  *)
+    case "\$1" in
+      sidebar-state) printf 'progress=none\n' ;;
+      todo) printf '{"items":[],"progress":{"completed":2,"total":10}}\n' ;;
+      *) printf '{}\n' ;;
+    esac ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
+jq -nc '{no:"1",name:"g17-overloaded",ws_ref:"workspace:401",ws_id:"id1",started_at:"2026-01-01T00:00:00Z"}' > "$mission/roster.jsonl"
+out17=$(PATH="$g17/bin:$PATH" bash "$D/board.sh" "$mission" 2>&1)
+if printf '%s' "$out17" | grep -q '部下1 g17-overloaded: todo が 10 件に積み上がっている'; then
+  ok '部下83 退行検査(board.sh): todo が既定しきい値以上に積み上がった部下が警告される'
+else
+  bad '部下83 の退行(board.sh): todo が積み上がった部下でも警告が出ない（積みすぎ検知が抜けている）'
+  printf '%s\n' "$out17" | sed 's/^/      /' | head -12
+fi
+
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi

@@ -16,6 +16,9 @@ ROSTER="$MISSION/roster.jsonl"
 # 実際に QUESTION.md が 4 日間気づかれなかった事故があるので、既定は短めの 30 分にする
 # （sweep.sh と揃える。COMMANDER_STALE_MIN で上書きできる）。
 STALE_MIN=${COMMANDER_STALE_MIN:-30}
+# 1人の部下に何件も積み増しされていないかの目安。積み増しは直列化と REPORT の停滞を招く
+# （事故: 1部下に10件積んで報告が最初の1件のまま止まった）。COMMANDER_TODO_OVERLOAD で上書きできる。
+TODO_OVERLOAD=${COMMANDER_TODO_OVERLOAD:-6}
 
 stale_suffix() { # $1=ファイルパス。放置分数がしきい値以上なら警告文字列を返す
   p="$1"
@@ -141,6 +144,9 @@ while IFS= read -r row; do
   [ -n "$plabel" ] && lines="${lines}  ${plabel}"
   lines="${lines}"$'\n'
   [ "$ttot" -gt 0 ] 2>/dev/null && lines="${lines}     todo ${tdone}/${ttot}${tnext:+ — 次: $tnext}"$'\n'
+  if [ "$ttot" -ge "$TODO_OVERLOAD" ] 2>/dev/null && [ ! -s "$WDIR/REPORT.md" ] && [ ! -s "$WDIR/PLAN.md" ]; then
+    must_see="${must_see}  ⚠ 部下${no} ${name}: todo が ${ttot} 件に積み上がっている（積みすぎの疑い。新しい依頼は新しい部下へ）"$'\n'
+  fi
   # 経過時間。agent hook を切っているので「手が空いた」通知が来ない。沈黙はここで気付く
   if [ -n "$started" ]; then
     # started_at は UTC(Z)。TZ=UTC を付けないと date -j がローカル時刻として解釈し、
