@@ -884,6 +884,79 @@ else
   printf '%s\n' "$out17c" | sed 's/^/      /'
 fi
 
+# 6ab) 構造検査: 部下テンプレの REPORT 節に「検証（コマンドと出力）」の枠があるか。
+#     事故: 部下が3回連続で「sprite を差し込み、動作確認済み」と報告したが、配信物
+#     （index.html）は1バイトも変わっておらず、実際は別ディレクトリのコピーを編集していた。
+#     報告に実コマンドと生出力を貼らせる枠が無いと、この事故の再発を防げない。
+if LC_ALL=C grep -aq '検証（コマンドと出力）' "$D/../templates/worker-prompt.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '編集したファイルを読み返すのは検証ではない' "$D/../templates/worker-prompt.md" 2>/dev/null; then
+  ok '部下テンプレの REPORT に「検証（コマンドと出力）」の枠と、編集ファイルの読み返しは検証でない旨がある'
+else
+  bad '部下テンプレに「検証（コマンドと出力）」の枠、または読み返しは検証でない旨が無い'
+fi
+
+# 6ac) 退行検査: verify.sh は「検証（コマンドと出力）」の節が無い報告を差し戻すか
+#     （自己申告の文章だけの完了報告を弾く。事故8 の再発防止）
+g19="$SANDBOX/g19"; mkdir -p "$g19"
+repo19="$g19/repo"; mission="$g19/mission"
+git init -q "$repo19" && git -C "$repo19" config user.email t@t.example \
+  && git -C "$repo19" config user.name t && git -C "$repo19" commit -q --allow-empty -m init >/dev/null 2>&1
+mkdir -p "$mission/workers/1"
+printf '## 結論\nspriteを差し込みました。動作確認済みです。\n## テスト\n1 passed\n' > "$mission/workers/1/REPORT.md"
+jq -nc --arg wt "$repo19" '{no:"1",name:"g19",worktree:$wt,repo:"",base:"main"}' > "$mission/roster.jsonl"
+out19=$(bash "$D/verify.sh" "$mission" 1 2>&1); rc19=$?
+if [ "$rc19" = "1" ] && printf '%s' "$out19" | grep -q '「検証（コマンドと出力）」の節が無い'; then
+  ok '事故8 退行検査: verify.sh は「検証（コマンドと出力）」の節が無い報告を差し戻す（自己申告だけの報告を弾く）'
+else
+  bad '事故8 の退行: verify.sh が検証節の無い報告を通してしまう（自己申告だけの完了報告を弾けない）'
+  printf '%s\n' "$out19" | sed 's/^/      /' | head -8
+fi
+
+# 6ad) 対照検査: 検証節があり、配信系キーワードに対して実コマンドが伴っていれば
+#       「節が無い」の差し戻しも「実コマンドが無い」の WARN も出ないこと
+mkdir -p "$mission/workers/2"
+printf '## 結論\nindex.htmlにspriteを差し込み、配信物で確認した。\n## 検証（コマンドと出力）\n```\n$ curl -sI https://example.com/index.html\nHTTP/1.1 200 OK\nContent-Length: 30820\n```\n## テスト\n1 passed\n' > "$mission/workers/2/REPORT.md"
+jq -nc --arg wt "$repo19" '{no:"2",name:"g19b",worktree:$wt,repo:"",base:"main"}' >> "$mission/roster.jsonl"
+out19b=$(bash "$D/verify.sh" "$mission" 2 2>&1)
+if printf '%s' "$out19b" | grep -q '「検証（コマンドと出力）」の節がある' \
+   && ! printf '%s' "$out19b" | grep -q '検証節に curl/aws s3/gh 等の実コマンドが見当たらない'; then
+  ok '対照検査: 検証節に実コマンドと出力があれば差し戻しも WARN も出ない'
+else
+  bad '対照検査の退行: 検証節に実コマンドがあるのに差し戻し・WARN が出る、または節ありの OK が出ない'
+  printf '%s\n' "$out19b" | sed 's/^/      /' | head -8
+fi
+
+# 6ae) WARN 検査: 配信系の言葉があるのに検証節に実コマンドが無ければ WARN を出す
+#       （bad にはしない。gh を使わない配信もあるため）
+mkdir -p "$mission/workers/3"
+printf '## 結論\n本番に反映した。配信を確認した。\n## 検証（コマンドと出力）\n目視で確認しました。\n## テスト\n1 passed\n' > "$mission/workers/3/REPORT.md"
+jq -nc --arg wt "$repo19" '{no:"3",name:"g19c",worktree:$wt,repo:"",base:"main"}' >> "$mission/roster.jsonl"
+out19c=$(bash "$D/verify.sh" "$mission" 3 2>&1)
+if printf '%s' "$out19c" | grep -q 'WARN 配信・投稿を伴う報告なのに検証節に curl/aws s3/gh 等の実コマンドが見当たらない'; then
+  ok 'WARN 検査: 配信系ワードがあるのに実コマンドが無い検証節は WARN される'
+else
+  bad 'WARN 検査の退行: 配信系ワードがあるのに実コマンド無しの検証節を見逃す'
+  printf '%s\n' "$out19c" | sed 's/^/      /' | head -8
+fi
+
+# 6af) 構造検査: spawn.sh は「検証」の節が無い PROMPT.md を拒否する（事故8 の二次防止。
+#      templates/worker-prompt.md 以外から手で組み立てた指令書に検証節が抜けるのを検出する）
+g20="$SANDBOX/g20"; mkdir -p "$g20/bin" "$g20/mission/workers/1" "$g20/cwd"
+cat > "$g20/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+exit 0
+CMUXSTUB
+chmod +x "$g20/bin/cmux"
+printf '# 部下\n依頼\ncmux todo set\n報告ディレクトリ: %s/mission/workers/1/\n' "$g20" > "$g20/mission/workers/1/PROMPT.md"
+out20=$(PATH="$g20/bin:$PATH" bash "$D/spawn.sh" "$g20/mission" 1 name desc "$g20/cwd" 2>&1)
+rc20=$?
+if [ "$rc20" != "0" ] && printf '%s' "$out20" | grep -q '検証'; then
+  ok '事故8 二次防止: spawn.sh は検証の節が無い PROMPT.md を拒否する'
+else
+  bad '事故8 の二次防止が退行: spawn.sh が検証の節無しの PROMPT.md を通してしまう'
+  printf '%s\n' "$out20" | sed 's/^/      /' | head -6
+fi
+
 # 7) 全スクリプトの構文
 for f in "$D"/*.sh; do
   bash -n "$f" 2>/dev/null || bad "構文エラー: $(basename "$f")"
