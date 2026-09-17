@@ -21,16 +21,28 @@
 #   MSG
 #
 # 終了コード: 0=届いた（入力欄が空になった、または処理中でキューに積まれた）
-#             1=既定回数試しても入力欄に本文が残ったまま（要介入）
+#             1=既定回数試しても入力欄に本文が残ったまま（要介入。Enter は毎回送っている）
 #             2=呼び出しエラー
-#             3=相手が Claude セッションに見えない（bash プロンプトだけ等）ため送信していない、
-#               または送信後に Claude の UI が画面から消えた（要介入。部下が落ちている可能性）
+#             3=送信前チェックで Claude セッションに見えず送信していない、または
+#               入力欄は空になった（＝Enter は効いた）が送信後の画面に Claude の UI が
+#               見当たらず届いたか確認できない（要介入。部下が落ちている可能性）
 #
-# 事故: `spawn.sh` が信頼ダイアログで "No, exit" を選んでしまい部下が即終了し、
+# 事故1: `spawn.sh` が信頼ダイアログで "No, exit" を選んでしまい部下が即終了し、
 # bash プロンプトだけが残った状態に `send.sh` が2回とも「届いた」と報告した
 # （入力欄が空かどうかしか見ておらず、bash プロンプトも打ち込んだ文字を実行して
 #  消費するので「空になった」に見えてしまう）。これを塞ぐため、送信前後で
-# 「画面に Claude の UI が実際に見えているか」を確認する（`claude_ui_present`）。
+# 「画面に Claude の UI が実際に見えているか」を確認する（`verify_claude_present`）。
+#
+# 事故2（事故1の修正が実運用で起こした副作用）: 60行ほどの長い本文を送ったとき、
+# (a) 送信直後の画面が本文のエコーで埋まり、`❯` の行やスピナー行が固定の --lines の
+#     窓の外へ押し出されて「Claude 不在」と誤判定した → 本文の行数に応じて読む行数を
+#     広げる（`READ_LINES`）ことで塞いだ。
+# (b) その誤判定を「入力欄に本文が残っているか」より先に見ていたため、Enter を
+#     再送する前に処理を打ち切り、**本文が入力欄に置かれたまま Enter が効かない状態で
+#     部下が気付かないまま止まった**（#13 で直した事故そのものの再発。しかも今回は
+#     入力欄に残った本文が途中で切れる形になった）。→ 判定順序を「入力欄が空か」を
+#     先に見る形に入れ替え、本文が残っている限りは Claude の UI 判定に関わらず
+#     Enter を送り直す（＝「置いたが押していない」で終了しない）。
 set -uo pipefail
 export CMUX_QUIET=1
 
@@ -57,6 +69,17 @@ else
   TEXT=$1
 fi
 [ -n "$TEXT" ] || die "本文が空"
+
+# read-screen で読む行数を本文の長さに合わせて広げる。
+# 誤検知（実運用）: 60行ほどの指示を送ったとき、送信直後の画面が本文のエコーで埋まり、
+# 入力欄（❯ の行）や生成中のスピナー行が固定の --lines 12 / 20 の窓の外へ押し出された。
+# その結果、実際は Claude が生きているのに「画面に Claude の UI が見当たらない」と誤報した。
+# 本文の行数 + 余白ぶんだけ読む（read-screen の --lines は --scrollback を暗黙に含むので
+# 表示外にスクロールしていても拾える）。
+text_lines=$(printf '%s\n' "$TEXT" | wc -l | tr -d '[:space:]')
+READ_LINES=$(( text_lines + 20 ))
+[ "$READ_LINES" -ge 20 ]  || READ_LINES=20
+[ "$READ_LINES" -le 500 ] || READ_LINES=500
 
 # 入力欄が空（=送信できた）かどうかの判定。
 # このハーネスの入力欄プロンプトは `❯`（U+276F）であることを実機で確認済み
@@ -101,10 +124,11 @@ text_residue_present() {
 #   - "esc to interrupt"      : 生成中（watch.sh の is_active と同じ）
 #   - "tokens)"                : スピナー行 `✻ Cooking… (3m 21s · ↓ 4.2k tokens)` の一部
 #   - "Bypassing Permissions"  : `--dangerously-skip-permissions` のモード表示
-#   - "❯"                      : 入力欄・選択ダイアログのプロンプト文字（U+276F。素の `>` ではない）
-# 既知の限界: bash 側のプロンプトを "❯" に変えるテーマ（starship 等）を使っていると
-# 誤検知しうる。この worktree 環境では既定 bash プロンプトの前提で運用する
-# （別 issue 候補。PR 本文に明記する）。
+#   - 行頭の "❯"               : 入力欄・選択ダイアログのプロンプト文字（U+276F。素の `>` ではない）。
+#     行のどこかに出るだけでは判定に使わず、行頭（前に空白のみ）に限定する
+#     （bash 側のプロンプトを "❯" に変えるテーマ（starship 等）を使っていると、それでも
+#      誤検知しうる。この worktree 環境では既定 bash プロンプトの前提で運用する。
+#      完全な解決ではないため別 issue 候補として PR 本文に明記する）。
 #
 # "Enter to confirm"（信頼/権限ダイアログの共通フッター。spawn.sh が扱う2種類の
 # 起動時ダイアログいずれにも実機で出現を確認済み）が出ているときは "dialog" として
@@ -112,10 +136,14 @@ text_residue_present() {
 # 「Claude は存在するが送ってはいけない」状態として扱い、送信をブロックする。
 screen_state() {
   case "$1" in
-    *"Enter to confirm"*) printf 'dialog\n' ;;
-    *"esc to interrupt"*|*"tokens)"*|*"Bypassing Permissions"*|*"❯"*) printf 'ok\n' ;;
-    *) printf 'absent\n' ;;
+    *"Enter to confirm"*) printf 'dialog\n'; return ;;
+    *"esc to interrupt"*|*"tokens)"*|*"Bypassing Permissions"*) printf 'ok\n'; return ;;
   esac
+  if printf '%s' "$1" | grep -qE '^[[:space:]]*❯([[:space:]]|$)'; then
+    printf 'ok\n'
+  else
+    printf 'absent\n'
+  fi
 }
 
 # 送信していい状態かを判定し、駄目なら理由付きで stderr に出す。0=送ってよい
@@ -133,18 +161,24 @@ verify_claude_present() {
   esac
 }
 
-scr0=$(cmux read-screen --workspace "$REF" --lines 20 2>/dev/null)
+scr0=$(cmux read-screen --workspace "$REF" --lines "$READ_LINES" 2>/dev/null)
 if ! verify_claude_present "$scr0"; then
-  printf '      cmux read-screen --workspace %s --lines 20 で画面を確認せよ。部下が落ちている可能性がある\n' "$REF" >&2
+  printf '      cmux read-screen --workspace %s --lines %s で画面を確認せよ。部下が落ちている可能性がある\n' "$REF" "$READ_LINES" >&2
   exit 3
 fi
 
+# 判定の優先順位が重要。誤検知（実運用）: 送信後チェック（Claude の UI が見えるか）を
+# 「入力欄に本文が残っているか」より先に見ていたため、大きな本文で一時的に UI 判定が
+# 曖昧になった瞬間に「Claude 不在」と即断して exit し、**Enter を再送する前に処理を
+# 打ち切っていた**（#13 で直した「入力欄に置いたまま気付かれない」事故の再発）。
+# 「一度 cmux send で本文を置いたら、入力欄が空になる（＝Enterが効いた）まで
+# 送り切る」を優先し、UI の有無は「入力欄が空に見える」ときだけ確認材料にする。
 attempt=0
 for attempt in 1 2 3 4; do
   out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
   cmux send-key --workspace "$REF" enter >/dev/null 2>&1
   sleep 3
-  scr=$(cmux read-screen --workspace "$REF" --lines 12 2>/dev/null)
+  scr=$(cmux read-screen --workspace "$REF" --lines "$READ_LINES" 2>/dev/null)
 
   # 部下がターン処理中だと queued 表示になる。届いてはいるので成功扱いにする
   # （次のターンで拾われる。SKILL.md 既知の挙動）。
@@ -155,18 +189,21 @@ for attempt in 1 2 3 4; do
       exit 0 ;;
   esac
 
+  if prompt_has_text "$scr" || text_residue_present "$scr"; then
+    printf 'send: 試行%s回目: 入力欄に本文が残っている、または画面に断片が残っている。send-key enter を再試行する\n' "$attempt" >&2
+    continue
+  fi
+
+  # ここに来た時点で入力欄は空（＝Enter は効いた）。Claude の UI 自体が消えていないか確認する。
   if ! verify_claude_present "$scr"; then
-    printf '      送信前は Claude の UI が見えていたが、送信後の画面（試行%s回目）で見えなくなった。\n' "$attempt" >&2
-    printf '      cmux read-screen --workspace %s --lines 20 で画面を確認せよ。部下が落ちている可能性がある\n' "$REF" >&2
+    printf '      入力欄は空になったが、送信後の画面（試行%s回目）に Claude の UI が見当たらない。\n' "$attempt" >&2
+    printf '      本文は送信済みの可能性があるが届いたかは未確認。cmux read-screen --workspace %s --lines %s で画面を確認せよ\n' "$REF" "$READ_LINES" >&2
     exit 3
   fi
 
-  if ! prompt_has_text "$scr" && ! text_residue_present "$scr"; then
-    printf 'OK 部下%s %s（%s）に届いた（入力欄が空になったことを確認。試行%s回）\n' \
-      "$NO" "$NAME" "$REF" "$attempt"
-    exit 0
-  fi
-  printf 'send: 試行%s回目: 入力欄に本文が残っている、または画面に断片が残っている。send-key enter を再試行する\n' "$attempt" >&2
+  printf 'OK 部下%s %s（%s）に届いた（入力欄が空になったことを確認。試行%s回）\n' \
+    "$NO" "$NAME" "$REF" "$attempt"
+  exit 0
 done
 
 printf 'send: 部下%s %s（%s）: %s回試しても入力欄に本文が残ったまま。cmux read-screen --workspace %s で画面を確認すること\n' \
