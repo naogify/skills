@@ -374,22 +374,34 @@ CMUX_QUIET=1 cmux new-workspace \
 - 名前に番号を入れるときは **必ず `#` 付き**。番号が切れるので長いタイトルは `--description` へ。
 - **ref は作り直すたびに変わる。** 別セッションで見た ref を使い回さない。必ず起動時の戻り値を使う。
 - **起動直後の確認は sleep を挟んだループで行う。単発の `read-screen` を即座に呼ばない。**
-  新しい worktree では `--dangerously-skip-permissions` を付けても `Do you trust this folder?`
-  が出て 1 文字も進まない（下記「罠」参照）。`claude` の起動には数秒かかるため、返ってきた直後に
-  1 回だけ `read-screen` を呼ぶと**まだ何も表示されていない空の画面**を見て
-  「起動失敗」と誤報する（実際に誤報した）。`spawn.sh` は内部で sleep 付きループを回して
-  trust プロンプトを自動で通すが、手で確認する場合も同じ形にする:
+  新しい worktree では `--dangerously-skip-permissions` を付けても信頼ダイアログが出て
+  1 文字も進まないことがある（下記「罠」参照）。`claude` の起動には数秒〜長いと
+  SessionStart hooks 分（実測 25 秒以上かかったことがある）かかるため、返ってきた直後に
+  1 回だけ `read-screen` を呼ぶと**まだ何も表示されていない空の画面**や**起動処理が
+  進行中なだけの画面**を見て「起動失敗」と誤報する（実際に両方とも誤報した）。
+  `spawn.sh` は内部でこの確認ループを回すが、**信頼ダイアログは自動で通さない**
+  （検出したら起動失敗として扱う。安全側。下記「罠」参照）。進行中の表示
+  （スピナー行・経過時間つきの `(...)`）が出ている間は待ち続け、それも一度も見えないまま
+  既定 30 秒（`SPAWN_GRACE_WAIT_SEC`）経てば諦める。全体の上限は既定 180 秒
+  （`SPAWN_MAX_WAIT_SEC`）。手で確認する場合も同じ形にする:
   ```bash
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  stuck=0
+  for _ in $(seq 1 60); do
     sleep 3
     scr=$(CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 20 2>/dev/null)
     case "$scr" in
-      *"trust this folder"*) CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter ;;
+      *"trust this folder"*)
+        echo "信頼ダイアログで停止。自動応答しない。画面を見て人間が判断してから答える"; break ;;
       *"esc to interrupt"*|*"Bypassing Permissions"*|*"tokens)"*) break ;;
+    esac
+    case "$scr" in
+      *"("[0-9]*"s · "*|*"("*[✻✳✢✽◑◯⏺]*) stuck=0 ;;  # 進行中の表示。猶予をリセット
+      *) stuck=$((stuck + 1)); [ "$stuck" -lt 10 ] || break ;;  # 進行中の表示が無いまま10回（約30秒）
     esac
   done
   ```
-  10 回まわして一度もマッチしなければ、そこで初めて「起動を確認できない」と扱い、画面を目視する。
+  進行中の表示も既知のダイアログも一度もマッチしないまま猶予が切れたら、そこで初めて
+  「起動を確認できない」と扱い、画面を目視する。
 - 起動できたら司令官が初期メタを打つ:
   ```bash
   CMUX_QUIET=1 cmux set-status task "<タスク>" --icon bolt.fill --color '#4C8DFF' --workspace workspace:<N>
@@ -1163,6 +1175,21 @@ MSG
 **送信自体を行わず**（送ってしまうと本文がそのままシェルに食われる。実際に本文中の引用行が
 リダイレクトとして解釈され worktree に空ファイルが作られた）、終了コード 3 で失敗する。
 
+**この修正自体が実運用で2つの副作用を起こした。両方直っている:**
+
+1. 60行ほどの長い本文を送ると、送信直後の画面が本文のエコーで埋まり、固定の
+   `--lines` の窓の外に入力欄やスピナー行が押し出されて「Claude 不在」と誤判定した。
+   → `send.sh` は本文の行数に応じて `read-screen --lines` を広げる
+   （本文の行数 + 20、20〜500 でクランプ）。
+2. その誤判定を「入力欄に本文が残っているか」より先に見ていたため、Enter を
+   再送する前に処理を打ち切り、**本文が入力欄に置かれたまま Enter が効かない状態で
+   部下が気付かないまま止まった**（#13 の事故そのものの再発。しかも入力欄に残った
+   本文が途中で切れる形になった）。→ 判定順序を「入力欄が空か」を先に見る形に
+   入れ替えた。**一度 `cmux send` で本文を置いたら、入力欄が空になる（＝Enter が
+   効いた）まで送り切る。Claude の UI が見えるかは、入力欄が空に見えたときだけ
+   確認材料にする。**「送らない」か「送り切る」かのどちらかで終わり、
+   「置いたが押していない」で終了しない。
+
 ### `cmux send` の本文にバッククォートを書くとコマンド置換される
 
 `cmux send --workspace ... "..."` のように**二重引用符の中でバッククォート**を書くと、
@@ -1308,14 +1335,17 @@ Phase 5「完了通知の本文は空っぽ」を参照。
 - `scripts/mission-start.sh` — mission ディレクトリ + サイドバーのグループを作る
 - `scripts/preflight.sh` — 起動前の資源チェック（ディスク / スワップ / メモリ / worktree 数）
 - `scripts/spawn.sh` — 部下 1 人を起動して roster に記録する。起動確認まで行い、信頼ダイアログ等で
-  止まっていたら `OK` を出さず終了コード 1 で失敗させる（`workers/<no>/SPAWN_FAILED` に理由を書く）
+  止まっていたら `OK` を出さず終了コード 1 で失敗させる（`workers/<no>/SPAWN_FAILED` に理由を書く）。
+  進行中の表示（スピナー等）が出ている間は既定 180 秒（`SPAWN_MAX_WAIT_SEC`）まで待ち続け、
+  進行中の表示が一度も無いまま既定 30 秒（`SPAWN_GRACE_WAIT_SEC`）経てば早めに諦める
 - `scripts/inbox.sh` — 新しい報告だけを出す（`--peek` で待機ループの条件に使える）
 - `scripts/verify.sh` — 完了報告を機械的に検収する（人間の指示を待たずに回す。長時間残留サブエージェントの画面確認も含む）
 - `scripts/report-watch.sh` — 主役。報告ファイルの出現・更新を常駐監視し、動くたびに1行ずつ通知する（`Monitor` に `persistent: true` または `timeout_ms` 最大値で渡す。fswatch が無ければポーリングにフォールバック。`--catch-up` で仕掛ける前の分も出す）
 - `scripts/watch.sh` — 保険。fswatch も `Monitor` も使えない環境向けのフォールバック、および `report-watch.sh` には無い「待ち」検知・60分沈黙検知が要るときに単発で使う（動きが出るまで待って終了する。終了時に `REARM:` 行で張り直すコマンドを出す）
 - `scripts/send.sh` — 部下への指示送信ラッパー（`cmux send` → `send-key enter` → 入力欄が空になったか確認、を1コマンドにする）。
-  送信前後に「画面に Claude の UI が実際に見えているか」も確認し、bash プロンプトだけ等で
-  Claude が居ないと判定したら送信せず終了コード 3 で失敗させる
+  送信前と、入力欄が空になった後に「画面に Claude の UI が実際に見えているか」も確認し、
+  bash プロンプトだけ等で Claude が居ないと判定したら送信せず（または送信を確認できず）
+  終了コード 3 で失敗させる。`read-screen --lines` は本文の行数に応じて広げる
 - `scripts/selftest.sh` — スクリプト自身の退行検査（**編集したら必ず回す**）
 - `scripts/board.sh` — 盤面（プログレスバー付き）を出す。先頭に「★ 今すぐ見るべきもの」banner を出す
 - `scripts/retire.sh` — 検証してからワークスペースと worktree を消す（危なければ止まる。`PR.md` の実物の PR がマージ済みなら REPORT.md が無くても撤収を許す）

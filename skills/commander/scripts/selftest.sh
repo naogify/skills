@@ -960,6 +960,86 @@ exit 0
 CMUXSTUB
 chmod +x "$g17/bin/cmux"
 
+# 6y-6) 実運用の誤検知2 の退行検査（誤検知そのものではなく、直したい性質を検証する）:
+#     送信後の画面に Claude の UI マーカー（❯ / esc to interrupt 等）が一切無くても、
+#     送った本文の断片がまだ画面に残っているなら「Claude 不在」と即断せず、
+#     Enter の再送を優先する。
+#     実際の事故: 60行ほどの長い本文を送ったとき、送信後チェック（Claude の UI が
+#     見えるか）を「入力欄に本文が残っているか」より先に見ていたため、本文で画面が
+#     埋まって UI 判定が一時的に曖昧になった瞬間に「Claude 不在」と即断して exit し、
+#     **Enter を再送する前に処理を打ち切っていた**（#13 で直した事故の再発）。
+scrsub="residue-no-ui-marker"; mkdir -p "$g17/screens/$scrsub"
+printf '❯ \n' > "$g17/screens/$scrsub/screen.1"   # 送信前チェック（Claude 存在確認）
+printf 'original message body twenty four chars continued here\n' > "$g17/screens/$scrsub/screen.2"  # 試行1回目: 本文の残留はあるが Claude の UI マーカーが無い画面
+printf '❯ \n' > "$g17/screens/$scrsub/screen.last"  # 試行2回目: 入力欄が空になり正常終了
+out17e=$(run17 "$scrsub" "original message body twenty four chars continued here"); rc17e=$?
+if [ "$rc17e" = "0" ] && printf '%s' "$out17e" | grep -q '再試行する' && printf '%s' "$out17e" | grep -q '試行2回' \
+   && ! printf '%s' "$out17e" | grep -q '見当たらない'; then
+  ok '事故3の退行検査: 送信後の画面に Claude の UI マーカーが無くても、本文の残留があれば Enter を再試行する（Claude不在と即断しない）'
+else
+  bad '事故3の退行: 本文が残っているのに Claude 不在と即断して Enter の再試行をせず終了している（#13 の事故が再発する）'
+  printf '      rc=%s\n' "$rc17e"
+  printf '%s\n' "$out17e" | sed 's/^/      /'
+fi
+
+# 6y-7) 実運用の誤検知2 の退行検査（read-screen の読み取り幅）:
+#     本文の行数に応じて --lines が広がっているか。
+#     実際の事故: 60行ほどの本文を送ったとき、画面が本文のエコーで埋まり、固定の
+#     --lines 12 / 20 の窓の外に入力欄・スピナー行が押し出されて誤検知した（司令官の見立て）。
+#     cmux read-screen に渡る --lines の値そのものを検査する。
+scrsub="lines-scaling"; mkdir -p "$g17/screens/$scrsub"
+printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
+lines_log="$g17/lines-log.txt"; : > "$lines_log"
+cat > "$g17/bin/cmux" <<CMUXSTUB
+#!/usr/bin/env bash
+case "\$1" in
+  send) exit 0 ;;
+  send-key) exit 0 ;;
+  read-screen)
+    prev=""
+    for a in "\$@"; do
+      [ "\$prev" = "--lines" ] && printf '%s\n' "\$a" >> "$lines_log"
+      prev="\$a"
+    done
+    n=\$(( \$(cat "\$COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "\$n" > "\$COUNTER_FILE"
+    f="\$SCREEN_DIR/screen.\$n"
+    [ -f "\$f" ] || f="\$SCREEN_DIR/screen.last"
+    cat "\$f" 2>/dev/null
+    exit 0
+    ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
+longtext=$(python3 -c "print(chr(10).join('line %d of a long instruction body' % i for i in range(40)))")
+run17 "$scrsub" "$longtext" >/dev/null 2>&1
+# 40行の本文 → READ_LINES = 40 + 20 = 60 のはず。送信前チェック・各試行のすべてで使われているか
+if [ -s "$lines_log" ] && ! grep -qvx '60' "$lines_log"; then
+  ok '実運用の誤検知2 退行検査: 本文が長いほど read-screen の --lines を広げる（40行の本文で60を使用）'
+else
+  bad '実運用の誤検知2 の退行: read-screen の --lines が本文の長さに応じて広がっていない'
+  printf '      lines_log:\n'; sed 's/^/      /' "$lines_log"
+fi
+# 元の cmux スタブに戻す
+cat > "$g17/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  send) exit 0 ;;
+  send-key) exit 0 ;;
+  read-screen)
+    n=$(( $(cat "$COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > "$COUNTER_FILE"
+    f="$SCREEN_DIR/screen.$n"
+    [ -f "$f" ] || f="$SCREEN_DIR/screen.last"
+    cat "$f" 2>/dev/null
+    exit 0
+    ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
+
 # 6ab) 構造検査: 部下テンプレの REPORT 節に「検証（コマンドと出力）」の枠があるか。
 #     事故: 部下が3回連続で「sprite を差し込み、動作確認済み」と報告したが、配信物
 #     （index.html）は1バイトも変わっておらず、実際は別ディレクトリのコピーを編集していた。
@@ -1045,7 +1125,7 @@ printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディ�
 printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディレクトリ: %s/mission/workers/2/\n' "$G21" \
   > "$G21/mission/workers/2/PROMPT.md"
 ws_list_g21="$G21/ws-list.json"
-jq -nc '{workspaces:[{id:"idT1",ref:"workspace:701"},{id:"idT2",ref:"workspace:702"}]}' > "$ws_list_g21"
+jq -nc '{workspaces:[{id:"idT1",ref:"workspace:701"},{id:"idT2",ref:"workspace:702"},{id:"idT3",ref:"workspace:703"},{id:"idT4",ref:"workspace:704"}]}' > "$ws_list_g21"
 cat > "$G21/bin/cmux" <<'CMUXSTUB'
 #!/usr/bin/env bash
 case "$1 $2" in
@@ -1053,7 +1133,20 @@ case "$1 $2" in
   *)
     case "$1" in
       new-workspace) printf 'OK %s\n' "$NEW_WS_REF" ;;
-      read-screen)   cat "$SCREEN_FILE" 2>/dev/null ;;
+      read-screen)
+        # SCREEN_DIR が指定されていれば呼び出し回数ごとに違う画面を返す
+        # （screen.1, screen.2, ... / フォールバックの screen.last）。
+        # 無ければ従来どおり SCREEN_FILE 固定（毎回同じ画面）。
+        if [ -n "${SCREEN_DIR:-}" ]; then
+          n=$(( $(cat "${COUNTER_FILE:?}" 2>/dev/null || echo 0) + 1 ))
+          printf '%s' "$n" > "$COUNTER_FILE"
+          f="$SCREEN_DIR/screen.$n"
+          [ -f "$f" ] || f="$SCREEN_DIR/screen.last"
+          cat "$f" 2>/dev/null
+        else
+          cat "$SCREEN_FILE" 2>/dev/null
+        fi
+        ;;
       send-key)      exit 0 ;;
       *)             exit 0 ;;
     esac ;;
@@ -1106,6 +1199,61 @@ else
   bad '対照検査の退行: 通常どおり起動できているのに spawn.sh が失敗扱いにしている'
   printf '      rc=%s\n' "$rcSpawnB"
   printf '%s\n' "$outSpawnB" | sed 's/^/      /'
+fi
+
+# 6ai) 実運用の誤検知1 の退行検査: SessionStart hooks の実行中（進行中の表示あり）を
+#     固定タイムアウトで「起動確認に失敗した」と誤報しないこと。
+#     実際の事故: 8回 × 3秒 = 24秒の固定タイムアウトで spawn.sh が起動失敗にしたが、
+#     画面には `✢ Scurrying… (running SessionStart hooks… 5/6 · 25s)` が出ており、
+#     実際は起動処理が進行中だった。進行中の表示が出ている間は待ち続け、
+#     UI が出た時点で決着するかを、SPAWN_POLL_INTERVAL_SEC / SPAWN_MAX_WAIT_SEC を
+#     小さくして高速に検査する（実際に3分待たせない）。
+mkdir -p "$G21/mission/workers/3"
+printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディレクトリ: %s/mission/workers/3/\n' "$G21" \
+  > "$G21/mission/workers/3/PROMPT.md"
+scrdir_hooks="$G21/screens-hooks"; mkdir -p "$scrdir_hooks"
+printf '✢ Scurrying… (running SessionStart hooks… 2/6 · 5s)\n'  > "$scrdir_hooks/screen.1"
+printf '✢ Scurrying… (running SessionStart hooks… 5/6 · 25s)\n' > "$scrdir_hooks/screen.2"
+printf '✻ Cooking… (esc to interrupt)\n' > "$scrdir_hooks/screen.last"
+: > "$G21/counter-hooks"
+outSpawnC=$(PATH="$G21/bin:$PATH" WS_LIST_FILE="$ws_list_g21" NEW_WS_REF="workspace:703" \
+  SCREEN_DIR="$scrdir_hooks" COUNTER_FILE="$G21/counter-hooks" \
+  SPAWN_POLL_INTERVAL_SEC=1 SPAWN_MAX_WAIT_SEC=10 SPAWN_GRACE_WAIT_SEC=2 \
+  bash "$D/spawn.sh" "$G21/mission" 3 g21-hooks desc "$G21/cwd" 2>&1)
+rcSpawnC=$?
+if [ "$rcSpawnC" = "0" ] && printf '%s' "$outSpawnC" | grep -q '^OK ' \
+   && [ ! -e "$G21/mission/workers/3/SPAWN_FAILED" ]; then
+  ok '実運用の誤検知1 退行検査: SessionStart hooks 実行中（進行中の表示）を起動失敗と誤報しない'
+else
+  bad '実運用の誤検知1 の退行: SessionStart hooks 実行中の進行表示を見落とし、起動失敗と誤報する'
+  printf '      rc=%s\n' "$rcSpawnC"
+  printf '%s\n' "$outSpawnC" | sed 's/^/      /'
+fi
+
+# 6aj) 対照検査: 進行中の表示が一度も出ない、正体不明の画面が続く場合は
+#     猶予（GRACE_WAIT）切れで早めに諦める（MAX_WAIT いっぱいまで無駄に待たない）。
+#     6ai で「待ち続ける」を追加した副作用として「本当に固まっている場合の失敗報告が
+#     遅くなる」を作っていないかを確認する。
+mkdir -p "$G21/mission/workers/4"
+printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディレクトリ: %s/mission/workers/4/\n' "$G21" \
+  > "$G21/mission/workers/4/PROMPT.md"
+scrdir_stuck="$G21/screens-stuck"; mkdir -p "$scrdir_stuck"
+printf '正体不明の画面（既知のダイアログでも進行中表示でもない）\n' > "$scrdir_stuck/screen.last"
+: > "$G21/counter-stuck"
+t0=$(date +%s)
+outSpawnD=$(PATH="$G21/bin:$PATH" WS_LIST_FILE="$ws_list_g21" NEW_WS_REF="workspace:704" \
+  SCREEN_DIR="$scrdir_stuck" COUNTER_FILE="$G21/counter-stuck" \
+  SPAWN_POLL_INTERVAL_SEC=1 SPAWN_MAX_WAIT_SEC=100 SPAWN_GRACE_WAIT_SEC=2 \
+  bash "$D/spawn.sh" "$G21/mission" 4 g21-stuck desc "$G21/cwd" 2>&1)
+rcSpawnD=$?
+t1=$(date +%s); elapsed=$((t1 - t0))
+if [ "$rcSpawnD" != "0" ] && [ -s "$G21/mission/workers/4/SPAWN_FAILED" ] \
+   && grep -q 'timeout' "$G21/mission/workers/4/SPAWN_FAILED" && [ "$elapsed" -lt 30 ]; then
+  ok "対照検査: 進行中の表示が一度も無い画面は猶予切れ（${elapsed}秒）で早めに諦める（MAX_WAIT=100秒を待ち切らない）"
+else
+  bad '対照検査の退行: 正体不明の画面が続いても諦めるのが遅い、または MAX_WAIT いっぱいまで待ってしまう'
+  printf '      rc=%s elapsed=%s秒\n' "$rcSpawnD" "$elapsed"
+  printf '%s\n' "$outSpawnD" | sed 's/^/      /'
 fi
 
 # 6z) report-watch.sh の退行検査: watch.sh の「1回発火したら死ぬ」を live reload 型（常駐 watcher）
