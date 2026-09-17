@@ -135,10 +135,43 @@ jq -e --arg no "$NO" 'select((.no|tostring)==$no)' "$MISSION/roster.jsonl" >/dev
 #   "trust this folder" ではない。既定で `1. No, exit` にカーソルが乗っているため、
 #   Enter だけ送ると **部下が即死する**（実際に起きた）。down → Enter で
 #   `2. Yes, I accept` を選ぶ必要がある（こちらは変種が無く、安全に自動化できる）。
+#
+# 誤検知（実運用）: 8回 × 3秒 = 24秒の固定タイムアウトで「起動確認に失敗した」と
+# 誤報したことがある。画面には `✢ Scurrying… (running SessionStart hooks… 5/6 · 25s)`
+# の形（Claude Code のスピナー文字 + 経過時間）が出ており、実際は起動処理が進行中だった。
+# 「一定時間待って諦める」ではなく「進行中の表示が出ている間は待ち続け、
+# 進行中の表示が一度も見えないまま猶予（GRACE_WAIT）が切れたときだけ諦める」に変える
+# （無条件に長く待つだけだと、本当に固まっている場合の失敗報告まで遅くなる）。
+# 進行中かどうかは watch.sh の is_active() で実機確認済みのパターン
+# （スピナー行 / 経過時間つきの `(...)`）を流用する。
+# 猶予・上限・間隔は SPAWN_GRACE_WAIT_SEC / SPAWN_MAX_WAIT_SEC / SPAWN_POLL_INTERVAL_SEC
+# で変更できる（selftest 用）。
+starting_up() {
+  case "$1" in
+    *"esc to interrupt"*|*"tokens)"*) return 0 ;;
+  esac
+  # watch.sh の is_active() と同じ2パターン（実機確認済み）をそのまま使う。
+  # 経過時間つきの `(3m 21s · ...)` 形と、スピナー行 `✻ Cooking… ...`。
+  # 今回の事故の画面 `✢ Scurrying… (running SessionStart hooks… 5/6 · 25s)` は
+  # 後者（行頭のスピナー文字）で拾える。
+  printf '%s' "$1" | grep -qE '\([0-9]+m? ?[0-9]*s · ' && return 0
+  printf '%s' "$1" | grep -qE '^[[:space:]]*[✻✳✢✽◑◯⏺][[:space:]]' && return 0
+  return 1
+}
+
+POLL_INTERVAL=${SPAWN_POLL_INTERVAL_SEC:-3}
+MAX_WAIT=${SPAWN_MAX_WAIT_SEC:-180}
+GRACE_WAIT=${SPAWN_GRACE_WAIT_SEC:-30}
+max_iters=$(( MAX_WAIT / POLL_INTERVAL ));   [ "$max_iters" -ge 1 ]   || max_iters=1
+grace_iters=$(( GRACE_WAIT / POLL_INTERVAL )); [ "$grace_iters" -ge 1 ] || grace_iters=1
+
 launched=0
 blocked=""
-for _ in 1 2 3 4 5 6 7 8; do
-  sleep 3
+i=0
+stuck=0  # 進行中の表示も既知のダイアログも一度も見えないまま連続した回数
+while [ "$i" -lt "$max_iters" ]; do
+  i=$((i + 1))
+  sleep "$POLL_INTERVAL"
   scr=$(cmux read-screen --workspace "$ref" --lines 20 2>/dev/null)
   case "$scr" in
     *"esc to interrupt"*|*"Bypassing Permissions"*) launched=1; break ;;  # 既に起動して走っている
@@ -147,6 +180,7 @@ for _ in 1 2 3 4 5 6 7 8; do
     *"No, exit"*"Yes, I accept"*|*"Bypass Permissions mode"*)
       cmux send-key --workspace "$ref" down  >/dev/null 2>&1
       cmux send-key --workspace "$ref" enter >/dev/null 2>&1
+      stuck=0
       continue ;;
   esac
   case "$scr" in
@@ -155,6 +189,12 @@ for _ in 1 2 3 4 5 6 7 8; do
       blocked="trust_dialog"
       break ;;
   esac
+  if starting_up "$scr"; then
+    stuck=0  # SessionStart hooks 等で起動が進行中。待ち続ける（猶予をリセット）
+  else
+    stuck=$((stuck + 1))
+    [ "$stuck" -lt "$grace_iters" ] || break  # 進行中の表示が一度も無いまま猶予切れ
+  fi
 done
 
 if [ "$launched" != 1 ]; then
@@ -173,7 +213,8 @@ if [ "$launched" != 1 ]; then
       printf '        （自動応答はしない。既定カーソルを誤って選ぶとセッションが即終了するため）\n' >&2
       ;;
     *)
-      printf '        %s 秒待っても起動を確認できなかった。cmux read-screen --workspace %s --lines 20 で画面を確認すること\n' "$((8*3))" "$ref" >&2
+      printf '        進行中の表示が一度も見えないまま %s 秒（最大 %s 秒）待っても起動を確認できなかった。\n' "$GRACE_WAIT" "$MAX_WAIT" >&2
+      printf '        cmux read-screen --workspace %s --lines 20 で画面を確認すること\n' "$ref" >&2
       ;;
   esac
   exit 1
