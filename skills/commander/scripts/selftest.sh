@@ -1490,4 +1490,38 @@ else
   printf '      needs-answer: %s\n' "$verify22b" | sed 's/^/      /'
 fi
 
+# 11) jev.sh の契約: 「使えない」は必ず終了コード 3 で、絶対に 0 を返さない。
+#     ここが崩れると、呼び出し側が「判定できなかった」を「判定が false だった」と取り違えて
+#     検収をすり抜けさせる。jev をこのスキルの必須依存にしないための一番大事な契約。
+jtmp=$(mktemp -d) || { printf 'mktemp 失敗\n' >&2; exit 1; }
+printf '{"a":1}\n' > "$jtmp/state.json"
+printf '{"q":{"type":"noul","instructions":"x"}}\n' > "$jtmp/questions.json"
+
+( unset TYPESAFE_API_KEY; bash "$D/jev.sh" "$jtmp/state.json" "$jtmp/questions.json" >/dev/null 2>&1 )
+[ $? = 3 ] && ok 'jev.sh: APIキー未設定なら終了コード 3' || bad 'jev.sh: APIキー未設定で 3 を返していない（呼び出し側が誤動作する）'
+
+bash "$D/jev.sh" "$jtmp/state.json" >/dev/null 2>&1
+[ $? = 2 ] && ok 'jev.sh: 引数不足なら終了コード 2' || bad 'jev.sh: 引数不足で 2 を返していない'
+
+printf 'これはJSONではない\n' > "$jtmp/broken.json"
+bash "$D/jev.sh" "$jtmp/broken.json" "$jtmp/questions.json" >/dev/null 2>&1
+[ $? = 2 ] && ok 'jev.sh: state が壊れた JSON なら終了コード 2' || bad 'jev.sh: 壊れた JSON を受け付けている'
+
+# 到達不能な API を向けても 0 を返さない（ネットワーク断でも検収をすり抜けさせない）。
+TYPESAFE_API_KEY=dummy TYPESAFE_API_BASE=http://127.0.0.1:1 COMMANDER_JEV_TIMEOUT=2 \
+  bash "$D/jev.sh" "$jtmp/state.json" "$jtmp/questions.json" >/dev/null 2>&1
+[ $? = 3 ] && ok 'jev.sh: API に到達できないときも終了コード 3' || bad 'jev.sh: 到達不能時に 3 以外を返した'
+
+# 15) `$var` の直後に全角文字を書いていないこと（今回踏んだ罠）。
+#     bash は `"...rc=$rc）"` の `）` を変数名の一部として読もうとし、set -u の下で
+#     「未割り当ての変数です」で落ちる。メッセージ文字列の中なので構文チェックでは見つからず、
+#     実際にそのエラー分岐に入るまで気付けない（jev.sh の通信失敗分岐がこれで壊れていた）。
+#     日本語のメッセージを書くこのスキルでは踏みやすいので、機械で止める。
+if grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]' $TARGETS 2>/dev/null | grep -q .; then
+  bad '$var の直後に全角文字がある（bash が変数名の一部として読む。${var} と書くこと）'
+  grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]' $TARGETS | head -5 | sed 's/^/      /'
+else
+  ok '$var の直後に全角文字は無い（全て ${var} で括られている）'
+fi
+
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi
