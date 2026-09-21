@@ -97,6 +97,58 @@ if [ -s "$REP" ]; then
   fi
 fi
 
+# 2b. hollow 検出（jev。APIキーが無ければ丸ごと省略する）
+#
+# ここまでの検収は全て「機械で真偽が確定すること」だけを見ている（節があるか、commit が実在するか）。
+# だが実際に起きた事故は grep では原理的に弾けない形だった:
+#   部下が3回連続で「sprite を差し込み、動作確認済み」と報告したが、配信物 index.html は
+#   1バイトも変わっておらず、実際は別ディレクトリのコピーを編集していた。
+# 「『検証（コマンドと出力）』の節があるか」は grep で見られるが、**その節の中身が本物の
+# コマンド出力なのか、それらしい文章なのか**は grep では分からない。そこだけを jev に聞く。
+#
+# jev が使えないときは何も検査せずに通す（従来どおりの挙動）。**検査できなかったことを
+# 「問題なし」と読ませない**ため、その旨を WARN で必ず出す。
+if [ -s "$REP" ]; then
+  _D="$(cd "$(dirname "$0")" && pwd)"
+  _jtmp=$(mktemp -d) || _jtmp=""
+  if [ -n "$_jtmp" ]; then
+    # diff は本文ではなく --stat だけを渡す（全文はトークンを食うだけで判断の質を上げない）。
+    _diffstat=""
+    if [ -n "$wt" ] && [ -d "$wt" ] && [ -n "$base" ]; then
+      _diffstat=$(git -C "$wt" diff --stat "origin/$base...HEAD" 2>/dev/null | tail -30)
+    fi
+    jq -n --rawfile report "$REP" --arg diffstat "$_diffstat" \
+      '{report: $report, diffstat: $diffstat}' > "$_jtmp/state.json" 2>/dev/null
+    cat > "$_jtmp/questions.json" <<'JSONQ'
+{
+  "evidence_is_real": { "type": "noul",
+    "instructions": "この報告の「検証（コマンドと出力）」の節は、実際に実行したコマンドとその生の出力を含んでいる（実行したという文章上の主張だけではない）" },
+  "report_matches_diff": { "type": "noul",
+    "instructions": "報告が述べている変更内容と、添えられている diff の統計（変更されたファイル）は対応している" }
+}
+JSONQ
+    if _ans=$(bash "$_D/jev.sh" "$_jtmp/state.json" "$_jtmp/questions.json" 2>/dev/null); then
+      # 肯定文で聞いているので、**確率が低いほど hollow**。0.3 未満を差し戻し、
+      # 0.6 未満は WARN に留める（差し戻しは人間の時間を使わないので厳しめでよいが、
+      # 部下を無駄に往復させる害もあるため、明確に低いときだけ落とす）。
+      for _k in evidence_is_real report_matches_diff; do
+        _v=$(printf '%s' "$_ans" | jq -r --arg k "$_k" '.[$k].noul // empty')
+        [ -n "$_v" ] || continue
+        if awk "BEGIN{exit !($_v < 0.3)}"; then
+          bad "hollow 検出: ${_k}=${_v}（報告が実体を伴っていない可能性が高い）"
+        elif awk "BEGIN{exit !($_v < 0.6)}"; then
+          printf '  WARN hollow 検出: %s=%s（断定できないが疑わしい）\n' "$_k" "$_v"
+        else
+          ok "hollow 検出: $_k=$_v"
+        fi
+      done
+    else
+      printf '  WARN jev が使えないため hollow 検出を省略した（検査していないだけで、問題が無いという意味ではない）\n'
+    fi
+    rm -rf "$_jtmp"
+  fi
+fi
+
 # 3. worktree の状態（コードを書いたタスク）
 if [ -n "$wt" ] && [ -d "$wt" ]; then
   dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')

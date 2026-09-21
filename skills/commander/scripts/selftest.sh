@@ -1512,6 +1512,111 @@ TYPESAFE_API_KEY=dummy TYPESAFE_API_BASE=http://127.0.0.1:1 COMMANDER_JEV_TIMEOU
   bash "$D/jev.sh" "$jtmp/state.json" "$jtmp/questions.json" >/dev/null 2>&1
 [ $? = 3 ] && ok 'jev.sh: API に到達できないときも終了コード 3' || bad 'jev.sh: 到達不能時に 3 以外を返した'
 
+# 12) スタブサーバを立てた実機テスト: jev.sh が answers を取り出し、
+#     escalate.sh が閾値どおりに「進めてよい / 人間に上げる」を出し分けるか。
+cat > "$jtmp/stub.py" <<'PYSTUB'
+# jev の API を模した最小のスタブ。POST を受けたら CANNED の中身をそのまま返す。
+import http.server, os, sys
+canned = open(os.environ['CANNED'], 'rb').read()
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(canned)))
+        self.end_headers()
+        self.wfile.write(canned)
+    def log_message(self, *a):
+        pass
+srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+open(os.environ['PORTFILE'], 'w').write(str(srv.server_port))
+srv.serve_forever()
+PYSTUB
+
+start_stub() {  # start_stub <canned-json-file> → $STUB_PORT に待ち受けポートが入る
+  rm -f "$jtmp/port"
+  CANNED="$1" PORTFILE="$jtmp/port" python3 "$jtmp/stub.py" & STUB_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "$jtmp/port" ] && break
+    sleep 0.2
+  done
+  STUB_PORT=$(cat "$jtmp/port" 2>/dev/null)
+}
+stop_stub() { [ -n "${STUB_PID:-}" ] && kill "$STUB_PID" 2>/dev/null; wait "$STUB_PID" 2>/dev/null; STUB_PID=""; }
+
+if command -v python3 >/dev/null 2>&1; then
+  # 12a. 全部低い確率 → 司令官が決めて進めてよい（終了コード 0）
+  cat > "$jtmp/low.json" <<'JSONL'
+{"model":"jev-stub","answers":{
+ "spec_ambiguous":{"type":"noul","noul":0.02},"scope_moves":{"type":"noul","noul":0.01},
+ "compat_risk":{"type":"noul","noul":0.03},"one_way_door":{"type":"noul","noul":0.0},
+ "cost":{"type":"noul","noul":0.05},"needs_go":{"type":"noul","noul":0.1}}}
+JSONL
+  # 12b. 1つだけ閾値超え → 人間に上げる（終了コード 1）
+  cat > "$jtmp/high.json" <<'JSONH'
+{"model":"jev-stub","answers":{
+ "spec_ambiguous":{"type":"noul","noul":0.02},"scope_moves":{"type":"noul","noul":0.01},
+ "compat_risk":{"type":"noul","noul":0.03},"one_way_door":{"type":"noul","noul":0.91},
+ "cost":{"type":"noul","noul":0.05},"needs_go":{"type":"noul","noul":0.1}}}
+JSONH
+
+  jmission="$jtmp/mission"; mkdir -p "$jmission/workers/1"
+  jq -nc '{no:"1",name:"jev-test",task:"テスト用タスク"}' > "$jmission/roster.jsonl"
+  printf 'STATE: done\n## 結論\nテスト\n## テスト\n1 passed\n## 検証（コマンドと出力）\n$ echo hi\nhi\n' \
+    > "$jmission/workers/1/STATUS.md"
+
+  start_stub "$jtmp/low.json"
+  TYPESAFE_API_KEY=dummy TYPESAFE_API_BASE="http://127.0.0.1:$STUB_PORT" \
+    bash "$D/escalate.sh" "$jmission" 1 >/dev/null 2>&1
+  rc_low=$?
+  stop_stub
+
+  start_stub "$jtmp/high.json"
+  esc_out=$(TYPESAFE_API_KEY=dummy TYPESAFE_API_BASE="http://127.0.0.1:$STUB_PORT" \
+    bash "$D/escalate.sh" "$jmission" 1 2>&1)
+  rc_high=$?
+  stop_stub
+
+  if [ "$rc_low" = "0" ] && [ "$rc_high" = "1" ] && printf '%s' "$esc_out" | grep -q 'one_way_door'; then
+    ok 'escalate.sh: 全部低確率なら進め、1つでも閾値超えなら人間に上げる'
+  else
+    bad "escalate.sh: 閾値の出し分けが壊れている（low=${rc_low} high=${rc_high}）"
+    printf '%s\n' "$esc_out" | sed 's/^/      /'
+  fi
+
+  # 13) verify.sh の hollow 検出: 低確率が返ったら差し戻す（終了コード 1）。
+  cat > "$jtmp/hollow.json" <<'JSONX'
+{"model":"jev-stub","answers":{
+ "evidence_is_real":{"type":"noul","noul":0.05},
+ "report_matches_diff":{"type":"noul","noul":0.9}}}
+JSONX
+  start_stub "$jtmp/hollow.json"
+  vout=$(TYPESAFE_API_KEY=dummy TYPESAFE_API_BASE="http://127.0.0.1:$STUB_PORT" \
+    bash "$D/verify.sh" "$jmission" 1 2>&1)
+  rcv=$?
+  stop_stub
+  if [ "$rcv" = "1" ] && printf '%s' "$vout" | grep -q 'hollow 検出: evidence_is_real'; then
+    ok 'verify.sh: hollow 検出が低確率を差し戻す'
+  else
+    bad "verify.sh: hollow 検出が効いていない（rc=${rcv}）"
+    printf '%s\n' "$vout" | sed 's/^/      /'
+  fi
+else
+  printf '  WARN python3 が無いため jev スタブの実機テストを省略した\n'
+fi
+
+# 14) jev が使えない環境で、verify.sh の既存の判定が変わっていないこと。
+#     jev の追加が「キーが無ければ従来どおり」を守れているかの退行検査。
+vout_nokey=$( unset TYPESAFE_API_KEY; bash "$D/verify.sh" "$jmission" 1 2>&1 )
+rcnk=$?
+if [ "$rcnk" = "0" ] && printf '%s' "$vout_nokey" | grep -q 'hollow 検出を省略した'; then
+  ok 'verify.sh: APIキーが無ければ hollow 検出を省略し、既存の判定を変えない'
+else
+  bad "verify.sh: APIキー無しのときの挙動が変わっている（rc=${rcnk}）"
+  printf '%s\n' "$vout_nokey" | sed 's/^/      /'
+fi
+rm -rf "$jtmp"
+
 # 15) `$var` の直後に全角文字を書いていないこと（今回踏んだ罠）。
 #     bash は `"...rc=$rc）"` の `）` を変数名の一部として読もうとし、set -u の下で
 #     「未割り当ての変数です」で落ちる。メッセージ文字列の中なので構文チェックでは見つからず、
