@@ -1490,4 +1490,64 @@ else
   printf '      needs-answer: %s\n' "$verify22b" | sed 's/^/      /'
 fi
 
+# 11) status.sh: 稼働中・落ちている・未報告の完了・判断待ちが 1 画面に出るか（読み取り専用も確認）
+g30="$SANDBOX/g30"; mkdir -p "$g30/bin" "$g30/home/m1/workers/1" "$g30/home/m1/workers/2" "$g30/home/m1/workers/3" "$g30/home/m1/workers/4" "$g30/home/m2/workers/1"
+ws30="$g30/ws.json"
+jq -nc '{workspaces:[{id:"id1",ref:"workspace:1"},{id:"id2",ref:"workspace:2"},{id:"id4",ref:"workspace:4"}]}' > "$ws30"
+cat > "$g30/bin/cmux" <<CMUXSTUB
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "workspace list") cat "$ws30" ;;
+  "workspace status") printf '{"effective":"working"}\n' ;;
+  *)
+    case "\$1" in
+      read-screen)
+        case "\$*" in
+          *workspace:4*) printf 'user@host repo %% \n' ;;
+          *) printf 'esc to interrupt\n' ;;
+        esac ;;
+      *) printf '{}\n' ;;
+    esac ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g30/bin/cmux"
+m30="$g30/home/m1"
+{
+  jq -nc '{no:"1",name:"g30-working",ws_ref:"workspace:1",ws_id:"id1"}'
+  jq -nc '{no:"2",name:"g30-question",ws_ref:"workspace:2",ws_id:"id2"}'
+  jq -nc '{no:"3",name:"g30-gone",ws_ref:"workspace:3",ws_id:"id3"}'
+  jq -nc '{no:"4",name:"g30-shell",ws_ref:"workspace:4",ws_id:"id4"}'
+} > "$m30/roster.jsonl"
+jq -nc '{no:"1",name:"g30-retired",ws_ref:"",ws_id:""}' > "$g30/home/m2/roster.jsonl"
+touch "$g30/home/m2/workers/1/RETIRED"
+printf 'STATE: needs-answer\n## 論点\nどちらの方式にするか\n' > "$m30/workers/2/STATUS.md"
+printf '2026-01-01T00:00:00Z\t9\tg30-done\n' > "$m30/completed.log"
+before30=$(cd "$g30/home" && find . -type f -exec stat -f '%z:%m %N' {} + 2>/dev/null | sort)
+out30=$(COMMANDER_HOME="$g30/home" PATH="$g30/bin:$PATH" bash "$D/status.sh" 2>&1)
+after30=$(cd "$g30/home" && find . -type f -exec stat -f '%z:%m %N' {} + 2>/dev/null | sort)
+if printf '%s' "$out30" | grep -q '部下1 g30-working | ▶作業中' \
+   && printf '%s' "$out30" | grep -q '部下2 g30-question | ❓確認待ち' \
+   && printf '%s' "$out30" | grep -q '判断が要るもの' \
+   && printf '%s' "$out30" | grep -q '❓確認待ち m1 部下2 g30-question.*どちらの方式にするか' \
+   && printf '%s' "$out30" | grep -q '部下3 g30-gone — ワークスペースが無い' \
+   && printf '%s' "$out30" | grep -q '部下4 g30-shell — .*claude が動いていない疑い' \
+   && printf '%s' "$out30" | grep -q '✔ m1 部下9 g30-done' \
+   && ! printf '%s' "$out30" | grep -q 'g30-retired' \
+   && [ "$before30" = "$after30" ]; then
+  ok 'status.sh: 稼働中・判断待ち・落ちている部下・未報告の完了を横断して出し、撤収済みは出さず、何も書き換えない'
+else
+  bad 'status.sh の退行: 稼働中/判断待ち/落ちている/未報告の完了のどれかが出ない、または書き換えた'
+  printf '%s\n' "$out30" | sed 's/^/      /' | head -30
+fi
+
+# 11b) 未報告の完了は reported.log に記録されたら消える
+printf '2026-01-01T00:00:00Z\t9\tg30-done\n' > "$m30/reported.log"
+out30b=$(COMMANDER_HOME="$g30/home" PATH="$g30/bin:$PATH" bash "$D/status.sh" 2>&1)
+if ! printf '%s' "$out30b" | grep -q '✔ m1 部下9'; then
+  ok 'status.sh: reported.log に記録済みの完了は未報告に出ない'
+else
+  bad 'status.sh の退行: 報告済みの完了が未報告として出続ける'
+fi
+
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi
