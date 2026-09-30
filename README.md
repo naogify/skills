@@ -15,6 +15,10 @@ Claude Code の個人用スキルを配布するための marketplace。
 /plugin install commander@naogify
 ```
 
+## 使い方
+
+- `/commander:status` — 部下の状況と、人間の判断が必要なことを 3 枠（部下の状況 / 人間が決めること / 返事待ち）でまとめて報告させる。中身は全ミッションを横断する読み取り専用の `skills/commander/scripts/status.sh`
+
 ## 更新を取り込む
 
 ```
