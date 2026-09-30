@@ -379,8 +379,10 @@ CMUX_QUIET=1 cmux new-workspace \
   SessionStart hooks 分（実測 25 秒以上かかったことがある）かかるため、返ってきた直後に
   1 回だけ `read-screen` を呼ぶと**まだ何も表示されていない空の画面**や**起動処理が
   進行中なだけの画面**を見て「起動失敗」と誤報する（実際に両方とも誤報した）。
-  `spawn.sh` は内部でこの確認ループを回すが、**信頼ダイアログは自動で通さない**
-  （検出したら起動失敗として扱う。安全側。下記「罠」参照）。進行中の表示
+  `spawn.sh` は内部でこの確認ループを回す。**信頼ダイアログは Enter 単発では通さず**、
+  「Yes, I trust this folder」の行へ矢印で移動してから Enter する（位置が判別できなければ
+  起動失敗として扱う。下記「罠」参照）。起動を確認したあと、画面が素のシェルに戻っていないか
+  もう一度確かめ、戻っていれば大きく警告して非ゼロで終わる。進行中の表示
   （スピナー行・経過時間つきの `(...)`）が出ている間は待ち続け、それも一度も見えないまま
   既定 30 秒（`SPAWN_GRACE_WAIT_SEC`）経てば諦める。全体の上限は既定 180 秒
   （`SPAWN_MAX_WAIT_SEC`）。手で確認する場合も同じ形にする:
@@ -391,7 +393,7 @@ CMUX_QUIET=1 cmux new-workspace \
     scr=$(CMUX_QUIET=1 cmux read-screen --workspace workspace:<N> --lines 20 2>/dev/null)
     case "$scr" in
       *"trust this folder"*)
-        echo "信頼ダイアログで停止。自動応答しない。画面を見て人間が判断してから答える"; break ;;
+        echo "信頼ダイアログで停止。Enter だけ送らず、Yes の行へ矢印で移動してから Enter する"; break ;;
       *"esc to interrupt"*|*"Bypassing Permissions"*|*"tokens)"*) break ;;
     esac
     case "$scr" in
@@ -1236,7 +1238,7 @@ MSG
 `spawn.sh` が起動確認をやるが、手で `cmux new-workspace` を叩いたときは自分でこれをやる。
 
 1. **信頼ダイアログ（`Do you trust this folder?` 系）** — claude が初めて見るディレクトリで出る。
-   作りたての worktree は必ずこれに当たる。**このスキルでは自動応答しない。**
+   作りたての worktree は必ずこれに当たる。**Enter 単発では通さない。**
    以前は「Enter だけで通る」と書いていたが、これは誤り。実際には
    `.claude/settings.local.json` が権限を大量にプレ承認している worktree では、次のような
    **既定カーソルが `No, exit`（拒否）側にある変種**が出る:
@@ -1257,8 +1259,12 @@ MSG
    ここで Enter だけ送ると「Yes, I trust this folder」ではなく **`No, exit` が選ばれて
    部下が即終了する**（実際に起きた。しかも残った bash プロンプトに対して `send.sh` の
    旧い判定が「届いた」と2回誤報し、部下が一度も動いていないことに97分間気付けなかった）。
-   変種ごとに既定カーソル位置を確実に判別する手段が無いため、**検出したら自動では
-   一切キーを送らず、人間が画面を見て判断してから手で答える**。
+   `spawn.sh` は画面から「Yes, I trust this folder」の行とカーソル（`❯`）の行を見つけ、
+   その差の分だけ **down / up を送ってから Enter** する（`claude-screen.sh` の `trust_dialog_keys`）。
+   カーソルか Yes の行が見つからない、または 3 回応答しても消えないときは推測せず起動失敗にする。
+   手で答えるときも同じ: Enter だけ送らず、`❯` が Yes の行に乗ったことを画面で確かめてから Enter。
+   （信頼確認を出さない claude の公式オプションは確認できていない。`--dangerously-skip-permissions` は
+   信頼ダイアログを省略せず、下の 2 のダイアログを別に出す）
 2. **`Bypass Permissions` の 2 択** — `--dangerously-skip-permissions` を付けたときに
    実際に出るのはこれで、信頼ダイアログとは別物:
    ```
@@ -1283,10 +1289,19 @@ case "$scr" in
     CMUX_QUIET=1 cmux send-key --workspace workspace:<N> down
     CMUX_QUIET=1 cmux send-key --workspace workspace:<N> enter ;;
   *"trust this folder"*)
-    # 自動応答しない。画面を見て、本当に信頼してよいディレクトリか人間が判断してから答える
-    printf '信頼ダイアログで止まっている。手で確認すること: workspace:<N>\n' >&2 ;;
+    # Enter だけ送らない。Yes の行へ矢印で移動してから Enter（spawn.sh の trust_dialog_keys 参照）
+    printf '信頼ダイアログで止まっている。Yes を選ぶこと: workspace:<N>\n' >&2 ;;
 esac
 ```
+
+**起動後に claude が終了していないかも確認する（事故 2026-09-30）。** 信頼ダイアログで
+`No, exit` が選ばれて claude が終了し、素のシェルだけが残った部下が、報告ファイルを 1 つも
+書かないまま約 2 時間放置された。`spawn.sh` は起動を確認した数秒後にもう一度画面を読み、
+素のシェルのプロンプトに戻っていれば `claude_exited` として失敗させる。運用中は
+`watch.sh` が「claude が動いていない部下」（画面がシェルに戻っている／確認ダイアログで停止）を
+**報告ファイルの有無に関係なく最優先**で単独通知し、`status.sh` は「落ちている部下」の節を
+先頭に出す（表の状態も 💀 に上書き。撤収済みは数えない）。復旧は `bash <workers/N>/run.sh` を
+打ち直し、ダイアログなら Yes を選ぶ。
 
 **起動確認を省くと、部下が 1 文字も進まないまま「静かに待っている」状態になる**
 （`Bypass Permissions` を Enter だけで通した場合は「静かに待っている」ではなく**即終了する**。

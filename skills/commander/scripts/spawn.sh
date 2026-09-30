@@ -61,6 +61,9 @@ grep -qF "$WDIR" "$WDIR/PROMPT.md" \
 grep -q '検証' "$WDIR/PROMPT.md" \
   || die "$WDIR/PROMPT.md に検証の節が無い（templates/worker-prompt.md から作り直す。「編集したファイルを読み返すのは検証ではない」を必ず含める）"
 
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/claude-screen.sh"
+
 MODEL=${COMMANDER_MODEL:-sonnet}
 
 cat > "$WDIR/run.sh" <<RUN
@@ -117,19 +120,16 @@ jq -e --arg no "$NO" 'select((.no|tostring)==$no)' "$MISSION/roster.jsonl" >/dev
 # 「走り始めた」と確認できるまでループを続ける（片方を処理したら break で抜けない）。
 #
 # 罠 1: 新しいディレクトリでは信頼ダイアログで止まる。
-#   **これは自動で通さない。** 「pre-approves N tool permissions」の警告付き変種
-#   （worktree に .claude/settings.local.json がある場合に出る。実例:
-#     ⚠ This folder pre-approves 69 tool permissions in .claude/settings.local.json
-#     ❯ No, exit
-#       Yes, I trust this folder
-#   ）はカーソルの既定位置が `No, exit` で、単純に Enter を送ると
-#   「Yes, I trust this folder」ではなく「No, exit」が選ばれてセッションが即終了する
-#   （実際に起きた事故。部下は一度も動かないまま、97分後に気付かれた。しかも残った
-#    bash プロンプトに対して send.sh の旧い判定（入力欄が空かどうかしか見ない）が
-#    「届いた」と誤報し続けた。send.sh 側の対策は別途 verify_claude_present で入れてある）。
-#   信頼ダイアログの変種ごとに既定カーソル位置を確実に判別する手段が無いため、
-#   検出したら自動応答せず起動失敗として扱う（安全側に倒す。無条件の自動承認は
-#   任意のディレクトリの .claude/settings.local.json の権限を黙って有効化しうるため避ける）。
+#   選択肢は「No, exit」と「Yes, I trust this folder」で、変種（worktree に
+#   .claude/settings.local.json があると出る「pre-approves N tool permissions」の警告付き）では
+#   カーソルの既定位置が `No, exit` になる。単純に Enter を送ると「No, exit」が選ばれて
+#   セッションが即終了する（実際に起きた事故。部下は一度も動かないまま 97 分〜2 時間放置され、
+#   素のシェルだけが残った）。
+#   → Enter 単発は送らない。画面から「Yes, I trust this folder」の行とカーソル行を見つけ、
+#     差の分だけ矢印キーを送ってから Enter（trust_dialog_keys。claude-screen.sh）。
+#     位置が判別できなければ自動応答せず起動失敗にする。
+#   （claude に信頼確認を出さない公式のオプションは確認できていない。--dangerously-skip-permissions
+#    は別の Bypass Permissions 確認を出すだけで、信頼ダイアログは省略しない）
 # 罠 2: `--dangerously-skip-permissions` を付けると実際に出るのは
 #   "Bypass Permissions" の 2 択（"1. No, exit" / "2. Yes, I accept"）であって
 #   "trust this folder" ではない。既定で `1. No, exit` にカーソルが乗っているため、
@@ -169,6 +169,7 @@ launched=0
 blocked=""
 i=0
 stuck=0  # 進行中の表示も既知のダイアログも一度も見えないまま連続した回数
+trust_tries=0
 while [ "$i" -lt "$max_iters" ]; do
   i=$((i + 1))
   sleep "$POLL_INTERVAL"
@@ -185,7 +186,19 @@ while [ "$i" -lt "$max_iters" ]; do
   esac
   case "$scr" in
     *"trust this folder"*)
-      # 自動応答しない（罠1参照）。誤ったキーを送るより、ここで止めて人間に委ねる方が安全。
+      # 「Yes, I trust this folder」の行にカーソルを動かしてから Enter（罠1参照）。
+      # 位置が判別できない、または 3 回応答しても同じダイアログが残るときは、
+      # 推測でキーを送らず起動失敗にする。
+      if [ "$trust_tries" -lt 3 ] && keys=$(trust_dialog_keys "$scr"); then
+        trust_tries=$((trust_tries + 1))
+        case "$keys" in
+          "down "*) for _ in $(seq 1 "${keys#down }"); do cmux send-key --workspace "$ref" down >/dev/null 2>&1; done ;;
+          "up "*)   for _ in $(seq 1 "${keys#up }");   do cmux send-key --workspace "$ref" up   >/dev/null 2>&1; done ;;
+        esac
+        cmux send-key --workspace "$ref" enter >/dev/null 2>&1
+        stuck=0
+        continue
+      fi
       blocked="trust_dialog"
       break ;;
   esac
@@ -196,6 +209,17 @@ while [ "$i" -lt "$max_iters" ]; do
     [ "$stuck" -lt "$grace_iters" ] || break  # 進行中の表示が一度も無いまま猶予切れ
   fi
 done
+
+# 起動を一度見えたあとに claude が終了することがある（ダイアログで「No, exit」を選んだ等）。
+# 落ち着くのを少し待ってからもう一度画面を読み、素のシェルに戻っていないことを確かめる。
+if [ "$launched" = 1 ]; then
+  sleep "${SPAWN_FINAL_CHECK_SEC:-3}"
+  scr=$(cmux read-screen --workspace "$ref" --lines 20 2>/dev/null)
+  if [ "$(claude_screen_state "$scr")" = "absent" ]; then
+    launched=0
+    blocked="claude_exited"
+  fi
+fi
 
 if [ "$launched" != 1 ]; then
   reason=${blocked:-timeout}
@@ -208,9 +232,17 @@ if [ "$launched" != 1 ]; then
     "$NO" "$NAME" "$ref" "$reason" >&2
   case "$reason" in
     trust_dialog)
-      printf '        信頼ダイアログで止まっている可能性が高い。cmux read-screen --workspace %s --lines 20 で画面を確認し、\n' "$ref" >&2
-      printf '        本当に信頼してよいディレクトリだと人間が判断したら手動で応答してから、再度この起動確認を行うこと\n' >&2
-      printf '        （自動応答はしない。既定カーソルを誤って選ぶとセッションが即終了するため）\n' >&2
+      printf '        信頼ダイアログで止まっている（選択肢の位置を判別できない、または応答しても消えない）。\n' >&2
+      printf '        cmux read-screen --workspace %s --lines 20 で画面を確認し、手で「Yes, I trust this folder」を選ぶこと\n' "$ref" >&2
+      printf '        （Enter だけ送らない。既定カーソルが No, exit のことがある）\n' >&2
+      ;;
+    claude_exited)
+      printf '\n'  >&2
+      printf '  ############################################################\n' >&2
+      printf '  # 部下%s %s（%s）: claude が起動後に終了している！        #\n' "$NO" "$NAME" "$ref" >&2
+      printf '  # 画面が素のシェルに戻っている。このままだと誰も気付かない #\n' >&2
+      printf '  ############################################################\n' >&2
+      printf '        cmux read-screen --workspace %s --lines 20 で画面を確認し、bash %s/run.sh を打ち直して復旧すること\n' "$ref" "$WDIR" >&2
       ;;
     *)
       printf '        進行中の表示が一度も見えないまま %s 秒（最大 %s 秒）待っても起動を確認できなかった。\n' "$GRACE_WAIT" "$MAX_WAIT" >&2

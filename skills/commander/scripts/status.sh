@@ -16,6 +16,8 @@ export CMUX_QUIET=1
 die() { printf '%s\n' "status: $*" >&2; exit 1; }
 command -v jq >/dev/null || die "jq が無い"
 
+. "$(cd "$(dirname "$0")" && pwd)/claude-screen.sh"
+
 HOME_DIR=${COMMANDER_HOME:-$HOME/.claude/commander}
 STALE_MIN=${COMMANDER_STALE_MIN:-30}
 
@@ -83,13 +85,17 @@ for MISSION in "${MISSIONS[@]:-}"; do
     fi
     n_active=$((n_active+1))
 
-    # claude が動いていない: 画面末尾がシェルのプロンプトだけで claude の UI が見えない
+    # claude が動いていない: 画面がシェルのプロンプトに戻っている／確認ダイアログで止まっている。
+    # 報告ファイルの有無より先に判定し、表の状態も上書きする（落ちた部下は報告を書かない）
+    dead=""
     if [ -n "$ref" ]; then
       scr=$(cmux read-screen --workspace "$ref" --lines 8 2>/dev/null)
       if [ -n "$scr" ]; then
-        case "$scr" in
-          *"esc to interrupt"*|*"? for shortcuts"*|*"bypass permissions"*|*"accept edits"*|*"❯"*|*"Claude Code"*) : ;;
-          *) down="${down}  ⚠ ${tag} — ワークスペースはあるが claude が動いていない疑い（画面を確認）"$'\n' ;;
+        case "$(claude_screen_state "$scr")" in
+          absent) dead="💀claude停止"
+                  down="${down}  ⚠ ${tag} — claude が動いていない（画面が素のシェルに戻っている）。cmux read-screen で確認し、run.sh を打ち直すか retire.sh で締める"$'\n' ;;
+          dialog) dead="⚠ダイアログ停止"
+                  down="${down}  ⚠ ${tag} — 確認ダイアログで止まっている。画面を確認し、Yes を選ぶ（Enter だけ送らない。既定が No, exit のことがある）"$'\n' ;;
         esac
       fi
     fi
@@ -124,6 +130,7 @@ for MISSION in "${MISSIONS[@]:-}"; do
     stale=""
     if [ -n "$age" ] && [ "$age" -ge "$STALE_MIN" ] 2>/dev/null; then stale="（${age}分放置）"; fi
     detail=""; [ -n "$file" ] && detail=$(first_line "$file")
+    [ -z "$dead" ] || { state="$dead"; wait_for="復旧（claude が動いていない）"; }
     table="${table}  ${tag} | ${state}${stale} | ${wait_for:--}"$'\n'
 
     # (b) 人間の判断が要るもの: 確認待ち・行き詰まり・編成案・検収待ち
@@ -148,6 +155,8 @@ for MISSION in "${MISSIONS[@]:-}"; do
 done
 
 printf '\n━━━ 状況 ━━━ 稼働ミッション %d ・ 稼働中の部下 %d\n' "$n_mission" "$n_active"
+printf '\n【落ちている部下】（最優先。claude が動いていない／ワークスペースが無い）\n'
+if [ -n "$down" ]; then printf '%s' "$down"; else printf '  なし\n'; fi
 if [ -n "$unrep" ]; then
   printf '\n【人間へ未報告の完了】（報告したら reported.sh で記録する）\n%s' "$unrep"
 fi
@@ -155,6 +164,4 @@ printf '\n【稼働中の部下】（ミッション 部下 担当 | 状態 | �
 if [ -n "$table" ]; then printf '%s' "$table"; else printf '  なし\n'; fi
 printf '\n【人間の判断が要るもの】\n'
 if [ -n "$decide" ]; then printf '%s' "$decide"; else printf '  なし\n'; fi
-printf '\n【落ちている部下】\n'
-if [ -n "$down" ]; then printf '%s' "$down"; else printf '  なし\n'; fi
 printf '\n'

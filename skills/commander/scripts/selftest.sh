@@ -1531,7 +1531,7 @@ if printf '%s' "$out30" | grep -q '部下1 g30-working | ▶作業中' \
    && printf '%s' "$out30" | grep -q '判断が要るもの' \
    && printf '%s' "$out30" | grep -q '❓確認待ち m1 部下2 g30-question.*どちらの方式にするか' \
    && printf '%s' "$out30" | grep -q '部下3 g30-gone — ワークスペースが無い' \
-   && printf '%s' "$out30" | grep -q '部下4 g30-shell — .*claude が動いていない疑い' \
+   && printf '%s' "$out30" | grep -q '部下4 g30-shell — claude が動いていない' \
    && printf '%s' "$out30" | grep -q '✔ m1 部下9 g30-done' \
    && ! printf '%s' "$out30" | grep -q 'g30-retired' \
    && [ "$before30" = "$after30" ]; then
@@ -1548,6 +1548,137 @@ if ! printf '%s' "$out30b" | grep -q '✔ m1 部下9'; then
   ok 'status.sh: reported.log に記録済みの完了は未報告に出ない'
 else
   bad 'status.sh の退行: 報告済みの完了が未報告として出続ける'
+fi
+
+# 12) 起動失敗の検知（2026-09-30 の事故: 信頼ダイアログで「No, exit」が選ばれて claude が終了し、
+#     素のシェルだけが残った部下が 2 時間放置された）。
+. "$D/claude-screen.sh"
+
+# 12a) 信頼ダイアログの応答は選択肢の位置に依らず「Yes, I trust this folder」を選ぶこと
+trust_no_first=$(printf ' ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n')
+trust_yes_first=$(printf ' ❯ Yes, I trust this folder\n   No, exit\n')
+trust_yes_second=$(printf '   Yes, I trust this folder\n ❯ No, exit\n')
+trust_nocursor=$(printf '   Yes, I trust this folder\n   No, exit\n')
+if [ "$(trust_dialog_keys "$trust_no_first")" = "down 1" ] \
+   && [ "$(trust_dialog_keys "$trust_yes_first")" = "enter" ] \
+   && [ "$(trust_dialog_keys "$trust_yes_second")" = "up 1" ] \
+   && ! trust_dialog_keys "$trust_nocursor" >/dev/null; then
+  ok '信頼ダイアログ: 既定が No, exit でも Yes が先頭でも、Yes の行へ矢印で移動して選ぶ（位置が判別できなければ推測しない）'
+else
+  bad '信頼ダイアログの応答が退行: Yes, I trust this folder を確実に選べていない'
+fi
+
+# 12b) spawn.sh が実際に down → enter を送り（Enter 単発を送らず）、起動成功になること
+G23="$SANDBOX/g23spawn"; mkdir -p "$G23/bin" "$G23/mission/workers/1" "$G23/mission/workers/2" "$G23/cwd"
+for n in 1 2; do
+  printf '# 部下\n依頼内容\ncmux todo set\n検証すること\n報告ディレクトリ: %s/mission/workers/%s/\n' "$G23" "$n" > "$G23/mission/workers/$n/PROMPT.md"
+done
+jq -nc '{workspaces:[{id:"idA",ref:"workspace:801"},{id:"idB",ref:"workspace:802"}]}' > "$G23/ws.json"
+cat > "$G23/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "workspace list") cat "$WS_LIST_FILE"; exit 0 ;;
+esac
+case "$1" in
+  new-workspace) printf 'OK %s\n' "$NEW_WS_REF" ;;
+  read-screen)
+    n=$(( $(cat "$COUNTER_FILE" 2>/dev/null || echo 0) + 1 )); printf '%s' "$n" > "$COUNTER_FILE"
+    f="$SCREEN_DIR/screen.$n"; [ -f "$f" ] || f="$SCREEN_DIR/screen.last"; cat "$f" ;;
+  send-key) printf '%s\n' "$*" | awk '{print $NF}' >> "$KEYS_LOG" ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$G23/bin/cmux"
+sd="$G23/screens-trust"; mkdir -p "$sd"
+printf ' Quick safety check: Is this a project you created or one you trust?\n ⚠ This folder pre-approves 69 tool permissions\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n' > "$sd/screen.1"
+printf '✻ Cooking… (3s · esc to interrupt)\n' > "$sd/screen.last"
+: > "$G23/counter1"; : > "$G23/keys1"
+out23=$(PATH="$G23/bin:$PATH" WS_LIST_FILE="$G23/ws.json" NEW_WS_REF="workspace:801" SCREEN_DIR="$sd" COUNTER_FILE="$G23/counter1" KEYS_LOG="$G23/keys1" \
+  SPAWN_POLL_INTERVAL_SEC=1 SPAWN_MAX_WAIT_SEC=20 SPAWN_FINAL_CHECK_SEC=0 bash "$D/spawn.sh" "$G23/mission" 1 g23-trust desc "$G23/cwd" 2>&1); rc23=$?
+if [ "$rc23" = "0" ] && printf '%s' "$out23" | grep -q '^OK ' && [ "$(paste -sd, "$G23/keys1")" = "down,enter" ]; then
+  ok 'spawn.sh: 既定が No, exit の信頼ダイアログには down → enter を送って Yes を選び、起動成功になる（Enter 単発は送らない）'
+else
+  bad 'spawn.sh の退行: 信頼ダイアログで Yes を選べていない（送ったキー: '"$(paste -sd, "$G23/keys1")"'）'
+  printf '%s\n' "$out23" | sed 's/^/      /' | head -8
+fi
+
+# 12c) 起動後に素のシェルへ戻っていたら、大きく警告して非ゼロで終わること（SPAWN_FAILED に claude_exited）
+sd2="$G23/screens-exit"; mkdir -p "$sd2"
+printf '✻ Cooking… (3s · esc to interrupt)\n' > "$sd2/screen.1"
+printf 'Bypassing Permissions\nuser@host repo %% \n' > "$sd2/screen.last"
+: > "$G23/counter2"; : > "$G23/keys2"
+out23b=$(PATH="$G23/bin:$PATH" WS_LIST_FILE="$G23/ws.json" NEW_WS_REF="workspace:802" SCREEN_DIR="$sd2" COUNTER_FILE="$G23/counter2" KEYS_LOG="$G23/keys2" \
+  SPAWN_POLL_INTERVAL_SEC=1 SPAWN_MAX_WAIT_SEC=20 SPAWN_FINAL_CHECK_SEC=0 bash "$D/spawn.sh" "$G23/mission" 2 g23-exit desc "$G23/cwd" 2>&1); rc23b=$?
+if [ "$rc23b" != "0" ] && ! printf '%s' "$out23b" | grep -q '^OK ' \
+   && grep -q 'claude_exited' "$G23/mission/workers/2/SPAWN_FAILED" 2>/dev/null && printf '%s' "$out23b" | grep -q '終了している'; then
+  ok 'spawn.sh: 起動後に画面が素のシェルへ戻っていたら OK を出さず、警告して非ゼロで終わる'
+else
+  bad 'spawn.sh の退行: claude が終了してシェルだけ残っているのに起動成功として扱う'
+  printf '      rc=%s\n' "$rc23b"; printf '%s\n' "$out23b" | sed 's/^/      /' | head -8
+fi
+
+# 12d) 画面分類: シェルのプロンプト（古い claude 表示がスクロールバックに残っていても）は absent
+if [ "$(claude_screen_state "$(printf '❯ hello\nBypassing Permissions\nuser@host repo %% ')")" = "absent" ] \
+   && [ "$(claude_screen_state "$(printf 'x\n$ ')")" = "absent" ] \
+   && [ "$(claude_screen_state "$(printf '✻ Cooking… (esc to interrupt)\n')")" = "ok" ] \
+   && [ "$(claude_screen_state "$(printf '╭──╮\n│ ❯ │\n╰──╯\n  ? for shortcuts')")" = "ok" ] \
+   && [ "$(claude_screen_state "$(printf 'Enter to confirm · Esc to cancel')")" = "dialog" ]; then
+  ok '画面分類: シェルのプロンプトは absent（古い claude 表示が残っていても）、claude の UI は ok、ダイアログは dialog'
+else
+  bad '画面分類 claude_screen_state が退行'
+fi
+
+# 12e) watch.sh: claude が動いていない部下を最優先で知らせる。撤収済み・動いている部下は出さない。
+#      報告ファイル（REPORT.md）の有無に関係なく出す。同じ部下は冷却時間内に再通知しない。
+g24="$SANDBOX/g24"; mkdir -p "$g24/bin" "$g24/m/workers/1" "$g24/m/workers/2" "$g24/m/workers/3" "$g24/m/workers/4"
+cat > "$g24/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+case "$1" in
+  read-screen)
+    case "$*" in
+      *workspace:911*) printf 'user@host repo %% \n' ;;
+      *workspace:913*) printf 'user@host repo %% \n' ;;
+      *workspace:914*) printf 'Do you trust?\n ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm\n' ;;
+      *) printf '✻ Cooking… (3s · esc to interrupt)\n' ;;
+    esac ;;
+  *) printf '{}\n' ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g24/bin/cmux"
+{
+  jq -nc '{no:"1",name:"g24-dead",ws_ref:"workspace:911",ws_id:"i1",started_at:"2026-09-30T00:00:00Z"}'
+  jq -nc '{no:"2",name:"g24-alive",ws_ref:"workspace:912",ws_id:"i2",started_at:"2026-09-30T00:00:00Z"}'
+  jq -nc '{no:"3",name:"g24-retired",ws_ref:"workspace:913",ws_id:"i3",started_at:"2026-09-30T00:00:00Z"}'
+  jq -nc '{no:"4",name:"g24-dialog",ws_ref:"workspace:914",ws_id:"i4",started_at:"2026-09-30T00:00:00Z"}'
+} > "$g24/m/roster.jsonl"
+touch "$g24/m/workers/3/RETIRED"
+printf '## 結論\n報告はあるが claude は居ない\n' > "$g24/m/workers/1/REPORT.md"
+out24=$(PATH="$g24/bin:$PATH" WATCH_DEAD_RECHECK_SEC=0 timeout 30 bash "$D/watch.sh" "$g24/m" 1 1 2>&1); rc24=$?
+out24b=$(PATH="$g24/bin:$PATH" WATCH_DEAD_RECHECK_SEC=0 timeout 30 bash "$D/watch.sh" "$g24/m" 1 1 2>&1)
+if [ "$rc24" = "0" ] && printf '%s' "$out24" | grep -q 'claude が動いていない部下がいる.*1(absent)' \
+   && printf '%s' "$out24" | grep -q '4(dialog)' \
+   && ! printf '%s' "$out24" | grep -qE '(^|[ :])2\(|3\(' \
+   && ! printf '%s' "$out24b" | grep -q 'claude が動いていない部下がいる'; then
+  ok 'watch.sh: claude が動いていない部下（シェルに戻った／ダイアログ停止）を報告ファイルの有無に関係なく最優先で知らせ、撤収済みと稼働中は出さず、冷却中は再通知しない'
+else
+  bad 'watch.sh の退行: claude が動いていない部下を検知しない、または撤収済み/稼働中を誤検知する、冷却が効かない'
+  printf '%s\n' "$out24" | sed 's/^/      /' | head -8
+fi
+
+# 12f) status.sh: 落ちている部下の節が先頭（未報告の完了・稼働中の表より前）に出て、表の状態も上書きされる
+out24s=$(COMMANDER_HOME="$g24/none" PATH="$g24/bin:$PATH" bash "$D/status.sh" "$g24/m" 2>&1)
+pos_down=$(printf '%s\n' "$out24s" | grep -n '【落ちている部下】' | head -1 | cut -d: -f1)
+pos_tbl=$(printf '%s\n' "$out24s" | grep -n '【稼働中の部下】' | head -1 | cut -d: -f1)
+if [ -n "$pos_down" ] && [ -n "$pos_tbl" ] && [ "$pos_down" -lt "$pos_tbl" ] \
+   && printf '%s' "$out24s" | grep -q '部下1 g24-dead — claude が動いていない' \
+   && printf '%s' "$out24s" | grep -q '部下1 g24-dead | 💀claude停止' \
+   && printf '%s' "$out24s" | grep -q '部下4 g24-dialog — 確認ダイアログで止まっている' \
+   && ! printf '%s' "$out24s" | grep -q 'g24-retired'; then
+  ok 'status.sh: claude が動いていない部下を「落ちている部下」の節（先頭）に出し、報告ファイルがあっても表を 💀 で上書きする（撤収済みは数えない）'
+else
+  bad 'status.sh の退行: claude が動いていない部下が先頭に出ない、または撤収済みを数える'
+  printf '%s\n' "$out24s" | sed 's/^/      /' | head -20
 fi
 
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi
