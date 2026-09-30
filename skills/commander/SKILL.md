@@ -1291,6 +1291,34 @@ CI では同じテストが全緑なので、ローカルの失敗だけを見�
   再実行しても直らない**（もう一方の部下が走り続けている限り衝突し続ける）。
   そのため「再実行で再現した」を根拠にリグレッションと断定してはならない
 
+### 部下が `pkill -f` で他のセッションを落とす（事故: 司令官と並行の部下の claude が消えた）
+
+部下・司令官・他の部下はすべて同じユーザーで動いている。部下が一時プロセスを片付けるつもりで
+`pkill -f x` を打ち、コマンドラインに "x" を含むプロセスをすべて落とした。司令官の claude と
+並行の部下の claude が落ち、cmux のタブごと消えた（部下本人は `QUESTION.md` で自己申告してきた）。
+
+- `templates/worker-prompt.md` と `templates/integrator-prompt.md` の禁止事項に「`pkill` /
+  `killall` / `pkill -f` を使わない。止めるのは自分が起動して PID を控えたプロセスだけ」を書いてある。
+  テンプレを使わずに指令書を組むときも、この行は必ず写す
+- 司令官自身も同じ。部下の後始末は `scripts/retire.sh` に任せ、`pkill` を手で打たない
+- dev サーバ等を起動するタスクでは、ポート指定（上記）と合わせて「起動時に PID を控える」ことを
+  指令書に書いておくと、部下が片付けで迷わない
+
+**落ちた後の復旧手順**:
+
+1. `ps aux | grep '[c]laude'` で生き残りを確認し、`cmux workspace list` で消えたワークスペースを洗い出す
+2. 落ちたセッションの ID を特定する。cmux のセッション保存ファイル
+   `~/Library/Application Support/cmux/session-com.cmuxterm.app.json` の
+   `terminal.agent.sessionId`（または `resumeBinding.checkpointId`）か、
+   `~/.claude/projects/<cwd を - で繋いだ名前>/<session-id>.jsonl` の更新時刻・`customTitle` から探す。
+   claude.ai/code のリモート URL（`session_...`）しか分からないときは、jsonl 中の
+   `bridgeSessionId`（`cse_...`）で照合する
+3. 元のワークスペースに `cmux new-surface --workspace <ref> --working-directory <cwd>` でタブを作り、
+   `claude --resume <session-id>`（部下なら元の `--model` 等の引数も付ける）で再開する
+4. 司令官を再開したら見張り（`report-watch.sh` + `Monitor`）を張り直す。バックグラウンドの
+   シェルタスクは再開しても戻らない
+5. ワークスペースごと消えた部下は、roster と worktree・`STATUS.md` を確認してから再投入する
+
 ### 通知は最新 1 件しか残らない（実測）
 
 `cmux notify` は**サーフェスごとに最新 1 件で上書きされる**。部下が `REPORT` を打っても、

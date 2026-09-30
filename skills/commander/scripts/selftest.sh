@@ -123,6 +123,17 @@ else
   bad '禁止事項が `Task` ツールを名指ししていない（解釈の幅が残ったまま。事故4 の再発防止が抜けている）'
 fi
 
+# 6e-2b) 部下が `pkill -f x` で司令官・並行の部下の claude を落とした事故の一次防止:
+#     部下・統合担当テンプレの禁止事項がパターン指定の kill を名指しで禁じているか
+if LC_ALL=C grep -aq 'プロセスをパターン指定でまとめて止めない' "$D/../templates/worker-prompt.md" 2>/dev/null \
+   && LC_ALL=C grep -aq 'プロセスをパターン指定でまとめて止めない' "$D/../templates/integrator-prompt.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '`pkill -f` を使わない' "$D/../templates/worker-prompt.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '部下が `pkill -f` で他のセッションを落とす' "$D/../SKILL.md" 2>/dev/null; then
+  ok '部下・統合担当テンプレと SKILL.md がパターン指定の kill を禁じている（pkill 事故の一次防止）'
+else
+  bad 'パターン指定の kill（pkill -f 等）の禁止が抜けている（司令官・並行の部下のセッションを落とす事故の再発防止が無い）'
+fi
+
 # 6e-3) 事故7 の一次防止: 最終成果物での検証原則が部下テンプレに書かれているか
 if LC_ALL=C grep -aq '検証は利用者が見る最終成果物そのもので行う' "$D/../templates/worker-prompt.md" 2>/dev/null \
    && LC_ALL=C grep -aq '間接的な兆候から進捗や成否を推測しない' "$D/../templates/worker-prompt.md" 2>/dev/null; then
