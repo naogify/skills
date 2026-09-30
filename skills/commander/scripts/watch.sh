@@ -19,7 +19,9 @@ INBOX="$HERE/inbox.sh"
 SELF="$HERE/watch.sh"
 STALL_STATE="$MISSION/watch.stall.state"
 SILENCE_STATE="$MISSION/watch.silence.state"
-touch "$STALL_STATE" "$SILENCE_STATE" 2>/dev/null || true
+DOWN_STATE="$MISSION/watch.down.state"
+. "$HERE/claude-screen.sh"
+touch "$STALL_STATE" "$SILENCE_STATE" "$DOWN_STATE" 2>/dev/null || true
 
 # 監視を終えるたびに、張り直すための正確なコマンドを最後の行に出す。
 # 「手順書に『張り直せ』と書くだけ」では、司令官が別件に気を取られている間に
@@ -96,6 +98,25 @@ scan_waiting() {
   done < "$ROSTER"
 }
 
+# 「claude が動いていない」部下の観測を1回ぶん行う。出力は "no<TAB>absent|dialog" の行。
+# 画面が素のシェルのプロンプトに戻っている（absent）／確認ダイアログで止まっている（dialog）。
+# 報告ファイルの有無は見ない（落ちた部下は報告を書かないので、報告が無いことは落ちた証拠にならず、
+# 報告が有っても claude が居ないなら異常）。撤収済みは数えない。
+# 事故（2026-09-30）: 信頼ダイアログで claude が終了し素のシェルだけが残った部下が、
+# 別の理由で落ちた古い部下の行と混ざった「60分以上報告が無い」の通知に埋もれて 2 時間放置された。
+scan_dead() {
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    no=$(printf '%s' "$row" | jq -r '.no'); ref=$(printf '%s' "$row" | jq -r '.ws_ref // ""')
+    [ -f "$MISSION/workers/$no/RETIRED" ] && continue
+    [ -n "$ref" ] || continue
+    scr=$(cmux read-screen --workspace "$ref" --lines 8 2>/dev/null)
+    [ -n "$scr" ] || continue
+    st=$(claude_screen_state "$scr")
+    [ "$st" = "ok" ] || printf '%s\t%s\n' "$no" "$st"
+  done < "$ROSTER"
+}
+
 waited=0
 while :; do
   # 稼働中（未撤収）の部下がいなければ、見張る理由が無い
@@ -107,6 +128,34 @@ while :; do
   done < "$ROSTER"
   if [ "$active" = "0" ]; then
     printf 'watch: 稼働中の部下がいない。監視を終了する\n'; exit 0
+  fi
+
+  # 最優先: claude が動いていない部下。inbox や沈黙検知より先に、単独で知らせる。
+  # 起動直後の切り替わりを拾わないよう、間をあけて2回観測して両方で残ったものだけ報告する。
+  # 同じ部下は DEAD_RENOTIFY_SEC（既定 30 分）経つまで再通知しない（張り直すたびの即再発火を防ぐ）。
+  dfirst="$(scan_dead)"
+  if [ -n "$dfirst" ]; then
+    sleep "${WATCH_DEAD_RECHECK_SEC:-5}"
+    dsecond="$(scan_dead)"
+    dreport=""; now=$(date +%s)
+    while IFS=$'\t' read -r no st; do
+      [ -n "$no" ] || continue
+      printf '%s' "$dsecond" | grep -q "^${no}	" || continue
+      last=$(awk -F'\t' -v no="$no" '$1==no{print $2; exit}' "$DOWN_STATE" 2>/dev/null)
+      case "${last:-0}" in ''|*[!0-9]*) last=0 ;; esac
+      [ $(( now - last )) -ge "${WATCH_DEAD_RENOTIFY_SEC:-1800}" ] || continue
+      dreport="${dreport}${no}($st) "
+      tmp=$(mktemp "${TMPDIR:-/tmp}/watch-down.XXXXXX") && {
+        { awk -F'\t' -v no="$no" '$1!=no' "$DOWN_STATE" 2>/dev/null; printf '%s\t%s\n' "$no" "$now"; } > "$tmp"
+        mv "$tmp" "$DOWN_STATE"; }
+    done <<< "$dfirst"
+    if [ -n "$dreport" ]; then
+      printf 'watch: ⚠ claude が動いていない部下がいる（最優先）: %s\n' "$dreport"
+      printf 'watch: absent=素のシェルに戻っている / dialog=確認ダイアログで止まっている。cmux read-screen で確認し、\n'
+      printf 'watch:        run.sh を打ち直す（ダイアログなら Yes を選ぶ）か retire.sh で締めること\n'
+      rearm_line
+      exit 0
+    fi
   fi
 
   # まず --peek で有無だけ見る。あったら「消化して」中身を出す。
