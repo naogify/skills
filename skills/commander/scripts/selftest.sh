@@ -1681,4 +1681,88 @@ else
   printf '%s\n' "$out24s" | sed 's/^/      /' | head -20
 fi
 
+# 13) watch-all.sh: 複数ミッションを 1 本で見張り、知らせるべきことだけを知らせる
+#     事故（2026-10-05）: 1 ミッション用の watch.sh では 3 ミッションを見張れず、司令官が自作した
+#     ループを部下追加のたびに張り直していたところ、張り直しの 1 回が auto mode の分類器に拒否され、
+#     見張りが無いまま部下の完了に気付かなかった。watch.sh は in-progress の更新でも発火してノイズも多かった。
+g40="$SANDBOX/g40"; H40="$g40/home"; mkdir -p "$g40/bin"
+for w in a b c d; do mkdir -p "$H40/m1/workers/$w"; done
+for w in e f g h i; do mkdir -p "$H40/m2/workers/$w"; done
+mkdir -p "$H40/old/workers/z"
+cat > "$g40/bin/cmux" <<'CMUXSTUB'
+#!/usr/bin/env bash
+box() { printf '⏺ 作業中のメモ\n\n──────── %s ─\n❯ %s\n─────────────\n  [Opus] status\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n' "$1" "$2"; }
+case "$1" in
+  read-screen)
+    case "$*" in
+      *ws-d*) printf '⏺ 前の表示\n  ⏵⏵ bypass permissions on\nuser@host repo %% \n' ;;
+      *ws-g*) box g '[Pasted text #1 +40 lines]' ;;
+      *ws-h*) box h 'run the tests' ;;
+      *ws-i*) box i '司令官より: PR を分けて出してください。マージはしない。' ;;
+      *ws-n*) box n '' ;;
+      *)      box x '' ;;
+    esac ;;
+  *) printf '{}\n' ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g40/bin/cmux"
+r40() { jq -nc --arg no "$1" --arg id "ws-$1" '{no:$no,name:("g40-"+$no),ws_ref:"workspace:999",ws_id:$id}'; }
+{ r40 a; r40 b; r40 c; r40 d; } > "$H40/m1/roster.jsonl"
+{ r40 e; r40 f; r40 g; r40 h; r40 i; } > "$H40/m2/roster.jsonl"
+r40 z > "$H40/old/roster.jsonl"; touch "$H40/old/workers/z/RETIRED"
+printf 'STATE: in-progress\n作業中\n' > "$H40/m1/workers/a/STATUS.md"
+printf 'STATE: done\n## 結論\nPR を出した\n' > "$H40/m1/workers/b/STATUS.md"
+printf 'STATE: done\n撤収済み\n' > "$H40/m1/workers/c/STATUS.md"; touch "$H40/m1/workers/c/RETIRED"
+printf 'STATE: needs-answer\n## 論点\nA か B か\n' > "$H40/m2/workers/e/STATUS.md"
+printf '## 何ができないか\n権限が無い\n' > "$H40/m2/workers/f/BLOCKED.md"
+printf '司令官より: PR を分けて出してください。マージはしない。\n' > "$H40/m2/workers/i/LAST_SEND"
+run40() { COMMANDER_HOME="$H40" PATH="$g40/bin:$PATH" WATCH_ALL_RECHECK_SEC=0 timeout 30 bash "$D/watch-all.sh" --interval 1 "$@" 2>&1; }
+out40=$(run40 --max 1); rc40=$?
+if [ "$rc40" = "0" ] \
+   && printf '%s' "$out40" | grep -q '^watch-all: done m1 部下b ' \
+   && printf '%s' "$out40" | grep -q '^watch-all: needs-answer m2 部下e ' \
+   && printf '%s' "$out40" | grep -q '^watch-all: needs-answer m2 部下f .*BLOCKED.md' \
+   && printf '%s' "$out40" | grep -q '^watch-all: dead m1 部下d .*absent' \
+   && printf '%s' "$out40" | grep -q '^watch-all: unsent m2 部下g .*Pasted text' \
+   && printf '%s' "$out40" | grep -q '^watch-all: unsent m2 部下i ' \
+   && ! printf '%s' "$out40" | grep -qE '部下(a|c|h|z) ' \
+   && printf '%s' "$out40" | tail -1 | grep -qE "^REARM: bash /[^\"' ]*/watch-all\.sh --interval 1 --max 1$"; then
+  ok 'watch-all.sh: 全ミッションを 1 本で見て done / needs-answer（旧 BLOCKED 含む）/ 落ちた部下 / 入力欄の未送信だけを知らせ、in-progress・撤収済み・入力候補の文字は知らせず、引用符なしの REARM を出す'
+else
+  bad 'watch-all.sh の退行: 知らせるべきものが出ない、知らせないものが出る、または REARM が許可ルールに前方一致しない形'
+  printf '      rc=%s\n' "$rc40"; printf '%s\n' "$out40" | sed 's/^/      /' | head -12
+fi
+
+# 13b) 張り直しても同じ出来事で即発火しない（in-progress の更新でも発火しない）
+printf 'STATE: in-progress\n作業中（更新）\n' > "$H40/m1/workers/a/STATUS.md"
+out40b=$(run40 --max 1)
+if printf '%s' "$out40b" | grep -q '動きなし' && ! printf '%s' "$out40b" | grep -q '^watch-all: \(done\|needs-answer\|dead\|unsent\) '; then
+  ok 'watch-all.sh: 張り直しても既に知らせた出来事で即発火せず、in-progress の更新でも発火しない'
+else
+  bad 'watch-all.sh の退行: 張り直すたびに同じ出来事で即発火する、または in-progress で発火する'
+  printf '%s\n' "$out40b" | sed 's/^/      /' | head -8
+fi
+
+# 13c) --follow: 走らせたまま部下を足しても（roster を毎周読み直すので）張り直さずに拾う。
+#      同じ部下が報告を書き直したら（更新時刻が変わったら）もう一度知らせる
+( COMMANDER_HOME="$H40" PATH="$g40/bin:$PATH" WATCH_ALL_RECHECK_SEC=0 timeout 8 \
+    bash "$D/watch-all.sh" --follow --interval 1 > "$g40/follow.out" 2>&1 ) &
+pid40=$!
+sleep 2
+mkdir -p "$H40/m1/workers/n"; r40 n >> "$H40/m1/roster.jsonl"
+printf 'STATE: done\n新しく足した部下の完了\n' > "$H40/m1/workers/n/STATUS.md"
+sleep 1.2
+printf 'STATE: done\n## 結論\nPR を出し直した\n' > "$H40/m1/workers/b/STATUS.md"
+touch -t 203001010000 "$H40/m1/workers/b/STATUS.md"
+wait "$pid40" 2>/dev/null
+if grep -q '^watch-all: done m1 部下n ' "$g40/follow.out" \
+   && grep -q '^watch-all: done m1 部下b .*出し直した' "$g40/follow.out" \
+   && ! grep -q '^REARM:' "$g40/follow.out"; then
+  ok 'watch-all.sh --follow: 走らせたまま足した部下を張り直し無しで拾い、報告の書き直しも拾う（REARM は出さない）'
+else
+  bad 'watch-all.sh --follow の退行: 足した部下を拾わない、書き直しを拾わない、または終了してしまう'
+  sed 's/^/      /' "$g40/follow.out" | head -8
+fi
+
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi
