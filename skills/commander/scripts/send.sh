@@ -3,6 +3,8 @@
 # 構造的に防ぐラッパー。
 #   send.sh <mission-dir> <no> <text>
 #   send.sh <mission-dir> <no> --stdin        （本文を標準入力から読む。下記参照）
+#   send.sh <mission-dir> <no> --enter        （本文は置かず Enter だけ送って確かめる。入力欄に
+#                                              指示が残っているとき＝watch-all.sh の unsent 用）
 #
 # 生の `cmux send` は入力欄にテキストを置くだけで Enter を押さない。押し忘れると部下は
 # 「指示が来ていない」まま止まり、司令官は「指示を出した」と思い込む
@@ -48,7 +50,7 @@ export CMUX_QUIET=1
 . "$(cd "$(dirname "$0")" && pwd)/claude-screen.sh"
 
 die() { printf '%s\n' "send: $*" >&2; exit 2; }
-[ $# -ge 3 ] || die "usage: send.sh <mission-dir> <no> <text> | send.sh <mission-dir> <no> --stdin"
+[ $# -ge 3 ] || die "usage: send.sh <mission-dir> <no> <text> | send.sh <mission-dir> <no> --stdin | send.sh <mission-dir> <no> --enter"
 MISSION=$1; NO=$2; shift 2
 
 command -v cmux >/dev/null || die "cmux が無い"
@@ -64,12 +66,18 @@ NAME=$(printf '%s' "$row" | jq -r '.name // ""')
 [ -n "$REF" ] && [ "$REF" != "null" ] || die "roster に ws_ref が無い（部下 $NO）"
 [ -f "$MISSION/workers/$NO/RETIRED" ] && die "部下 $NO は撤収済み（RETIRED）。送信先を確認する"
 
+ENTER_ONLY=0
 if [ "$1" = "--stdin" ]; then
   TEXT=$(cat)
+elif [ "$1" = "--enter" ]; then
+  # 入力欄に残っている本文を送り直すと 2 重になるので、Enter だけを送る。
+  # 罫線が見えない画面での残留判定に使うため、最後に送った本文を読んでおく
+  ENTER_ONLY=1
+  TEXT=$(cat "$MISSION/workers/$NO/LAST_SEND" 2>/dev/null || true)
 else
   TEXT=$1
 fi
-[ -n "$TEXT" ] || die "本文が空"
+[ "$ENTER_ONLY" = "1" ] || [ -n "$TEXT" ] || die "本文が空"
 
 # read-screen で読む行数を本文の長さに合わせて広げる。
 # 誤検知（実運用）: 60行ほどの指示を送ったとき、送信直後の画面が本文のエコーで埋まり、
@@ -186,9 +194,11 @@ fi
 # 入力欄に残っていた本文の後ろに同じ本文が足されて 2 重になる。以前はそうなっていた）。
 # 長い本文は貼り付けの取り込みが終わる前に Enter が届くと、Enter が本文の改行として
 # 吸われて送信されない。置いてから SEND_ENTER_DELAY 秒（既定 1）待って Enter を送る。
-out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
-# watch-all.sh が「この本文が入力欄に居座っている」を見分けるために、最後に送った本文を残す
-printf '%s\n' "$TEXT" > "$MISSION/workers/$NO/LAST_SEND" 2>/dev/null || true
+if [ "$ENTER_ONLY" = "0" ]; then
+  out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
+  # watch-all.sh が「この本文が入力欄に居座っている」を見分けるために、最後に送った本文を残す
+  printf '%s\n' "$TEXT" > "$MISSION/workers/$NO/LAST_SEND" 2>/dev/null || true
+fi
 attempt=0
 for attempt in 1 2 3 4; do
   sleep "${SEND_ENTER_DELAY:-1}"

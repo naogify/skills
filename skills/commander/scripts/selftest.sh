@@ -946,6 +946,22 @@ else
   printf '%s\n' "$out17f" | sed 's/^/      /'
 fi
 
+# 6y-3d) --enter: 入力欄に残った指示に Enter だけを送る（本文は置かない）。空になれば成功
+: > "$SEND_LOG17"
+scrsub="enteronly"; mkdir -p "$g17/screens/$scrsub"
+printf '──── w ─\n❯ [Pasted text #1 +40 lines]\n────\n  status\n' > "$g17/screens/$scrsub/screen.1"
+printf '──── w ─\n❯ [Pasted text #1 +40 lines]\n────\n  status\n' > "$g17/screens/$scrsub/screen.2"
+printf '──── w ─\n❯ \n────\n  status\n' > "$g17/screens/$scrsub/screen.last"
+out17g=$(run17 "$scrsub" --enter); rc17g=$?
+if [ "$rc17g" = "0" ] && printf '%s' "$out17g" | grep -q '試行2回' \
+   && [ "$(grep -c '^send$' "$SEND_LOG17")" = "0" ] && [ "$(grep -c '^key$' "$SEND_LOG17")" = "2" ]; then
+  ok 'send.sh --enter: 本文は置かず Enter だけを送り、入力欄が空になったら成功する'
+else
+  bad 'send.sh --enter の退行: 本文を置いてしまう、または入力欄が空になっても成功しない'
+  printf '      rc=%s send=%s key=%s\n' "$rc17g" "$(grep -c '^send$' "$SEND_LOG17")" "$(grep -c '^key$' "$SEND_LOG17")"
+  printf '%s\n' "$out17g" | sed 's/^/      /'
+fi
+
 # 6y-4) 本丸の退行検査（今回の事故そのもの）: 画面が bash プロンプトだけ（Claude の UI が無い）
 #     状態で send.sh を呼んでも、絶対に「届いた」と報告してはいけない。
 #     実際の事故: spawn.sh が信頼ダイアログで既定の "No, exit" を選んでセッションが即終了し、
