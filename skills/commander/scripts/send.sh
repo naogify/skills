@@ -45,6 +45,7 @@
 #     Enter を送り直す（＝「置いたが押していない」で終了しない）。
 set -uo pipefail
 export CMUX_QUIET=1
+. "$(cd "$(dirname "$0")" && pwd)/claude-screen.sh"
 
 die() { printf '%s\n' "send: $*" >&2; exit 2; }
 [ $# -ge 3 ] || die "usage: send.sh <mission-dir> <no> <text> | send.sh <mission-dir> <no> --stdin"
@@ -81,18 +82,28 @@ READ_LINES=$(( text_lines + 20 ))
 [ "$READ_LINES" -ge 20 ]  || READ_LINES=20
 [ "$READ_LINES" -le 500 ] || READ_LINES=500
 
-# 入力欄が空（=送信できた）かどうかの判定。
-# このハーネスの入力欄プロンプトは `❯`（U+276F）であることを実機で確認済み
-# （素の `>` ではない。cmux-api.md / SKILL.md が例に挙げている `^ *> ` は一致しない）。
-# 念のため両方の文字を見る。「プロンプト文字の直後に空白以外の文字が続く」行が
-# あれば、本文がまだ入力欄に居座っている＝未送信。
-prompt_has_text() {
-  printf '%s' "$1" | grep -E '^[[:space:]]*[❯>][[:space:]]+[^[:space:]]' >/dev/null 2>&1
+# 入力欄に本文が残っている（=未送信）かどうかの判定。
+# 入力欄は画面下部の 2 本の罫線（───）に挟まれた領域で、`input_box_text`（claude-screen.sh）が
+# その中身だけを取り出す。罫線の間に文字があれば未送信。長い本文は "[Pasted text #1 +N lines]" に
+# 畳まれて入力欄に出るので、これも未送信として拾える。折り返された本文の続きも罫線の間に入る。
+#
+# 誤判定（実機で確認）: Claude Code は送信済みの発言を会話欄に `❯ 本文` の形で残す。
+# 以前は「画面のどこかに `❯ 文字` の行がある」「送った本文の断片が画面のどこかにある」で
+# 未送信と判定していたため、**送信に成功した直後の画面でも必ず未送信と判定し**、
+# 本文を最大 4 回貼り直したうえで「届かなかった」（終了コード 1）を返していた。
+# 罫線が見つからない画面（長い本文のエコーで入力欄が読む窓の外に押し出された・古い UI 等）だけ、
+# 従来の判定（行頭 ❯ の直後に文字 / 本文の断片が画面に残っている）に戻す。入力欄が見えない以上
+# 「送れた」とは言えないので、ここは未送信寄りに倒して Enter を送り直す。
+input_pending() {
+  if [ "$(printf '%s\n' "$1" | grep -c '^[[:space:]]*─')" -ge 2 ]; then
+    [ -n "$(input_box_text "$1")" ]
+  else
+    printf '%s' "$1" | grep -E '^[[:space:]]*[❯>][[:space:]]+[^[:space:]]' >/dev/null 2>&1 \
+      || text_residue_present "$1"
+  fi
 }
 
-# 「入力欄は空に見えるが、折り返された本文の続きが ❯ の付かない行として画面の
-# どこかに残っている」ケースを拾うための断片抽出（実際に3回、これで見逃した）。
-# 先頭の空でない行の先頭24文字を断片として使う。
+# 本文の先頭の空でない行の先頭 24 文字（罫線が見えない画面での残留判定に使う）。
 text_fragment() {
   local text=$1 line
   while IFS= read -r line; do
@@ -108,9 +119,7 @@ $text
 EOF
 }
 
-# 入力欄のプロンプト行が空に見えても、送った本文の断片が画面のどこかに
-# 残っていれば「届いていない」とみなす。断片が短すぎる（8文字未満）場合は
-# 誤検知を避けるため判定しない。
+# 断片が短すぎる（8 文字未満）場合は誤検知を避けるため判定しない。
 text_residue_present() {
   local scr=$1 frag
   frag=$(text_fragment "$TEXT")
@@ -173,11 +182,18 @@ fi
 # 打ち切っていた**（#13 で直した「入力欄に置いたまま気付かれない」事故の再発）。
 # 「一度 cmux send で本文を置いたら、入力欄が空になる（＝Enterが効いた）まで
 # 送り切る」を優先し、UI の有無は「入力欄が空に見える」ときだけ確認材料にする。
+# 本文を置くのは 1 回だけ。再試行で送り直すのは Enter だけにする（本文を送り直すと、
+# 入力欄に残っていた本文の後ろに同じ本文が足されて 2 重になる。以前はそうなっていた）。
+# 長い本文は貼り付けの取り込みが終わる前に Enter が届くと、Enter が本文の改行として
+# 吸われて送信されない。置いてから SEND_ENTER_DELAY 秒（既定 1）待って Enter を送る。
+out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
+# watch-all.sh が「この本文が入力欄に居座っている」を見分けるために、最後に送った本文を残す
+printf '%s\n' "$TEXT" > "$MISSION/workers/$NO/LAST_SEND" 2>/dev/null || true
 attempt=0
 for attempt in 1 2 3 4; do
-  out=$(cmux send --workspace "$REF" "$TEXT" 2>&1) || die "cmux send 自体が失敗した: $out"
+  sleep "${SEND_ENTER_DELAY:-1}"
   cmux send-key --workspace "$REF" enter >/dev/null 2>&1
-  sleep 3
+  sleep "${SEND_CHECK_DELAY:-3}"
   scr=$(cmux read-screen --workspace "$REF" --lines "$READ_LINES" 2>/dev/null)
 
   # 部下がターン処理中だと queued 表示になる。届いてはいるので成功扱いにする
@@ -189,8 +205,8 @@ for attempt in 1 2 3 4; do
       exit 0 ;;
   esac
 
-  if prompt_has_text "$scr" || text_residue_present "$scr"; then
-    printf 'send: 試行%s回目: 入力欄に本文が残っている、または画面に断片が残っている。send-key enter を再試行する\n' "$attempt" >&2
+  if input_pending "$scr"; then
+    printf 'send: 試行%s回目: 入力欄に本文が残っている。send-key enter を再試行する\n' "$attempt" >&2
     continue
   fi
 

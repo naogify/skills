@@ -854,7 +854,7 @@ run17() {
   local scrsub="$1"; shift
   : > "$g17/counter"
   PATH="$g17/bin:$PATH" COUNTER_FILE="$g17/counter" SCREEN_DIR="$g17/screens/$scrsub" \
-    bash "$D/send.sh" "$g17/mission" 42 "$@" 2>&1
+    SEND_ENTER_DELAY=0 SEND_CHECK_DELAY=0 bash "$D/send.sh" "$g17/mission" 42 "$@" 2>&1
 }
 
 # 6y-1) 対照検査: 正常時（入力欄が最初から空）は従来どおり試行1回で成功する
@@ -880,19 +880,70 @@ else
   printf '%s\n' "$out17b" | sed 's/^/      /'
 fi
 
-# 6y-3) 本丸の退行検査: 入力欄（❯ の行）は空に見えても、送った本文の断片が
-#     ❯ の付かない行として画面のどこかに残っていれば「未送信」として再送する
+# 6y-3) 本丸の退行検査: 入力欄（罫線の間）の先頭行は ❯ だけでも、折り返された本文の続きが
+#     罫線の間に残っていれば「未送信」として Enter を送り直す
 scrsub="residue"; mkdir -p "$g17/screens/$scrsub"
 printf '❯ \n' > "$g17/screens/$scrsub/screen.1"   # 送信前チェック（Claude 存在確認）
-printf '❯ \n  original message body twenty four chars continued here\n' > "$g17/screens/$scrsub/screen.2"
-printf '❯ \n' > "$g17/screens/$scrsub/screen.last"
+printf '──── w ─\n❯ \n  original message body twenty four chars continued here\n────\n  status\n' > "$g17/screens/$scrsub/screen.2"
+printf '──── w ─\n❯ \n────\n  status\n' > "$g17/screens/$scrsub/screen.last"
 out17c=$(run17 "$scrsub" "original message body twenty four chars continued here")
 if printf '%s' "$out17c" | grep -q '再試行する' && printf '%s' "$out17c" | grep -q '^OK ' \
    && printf '%s' "$out17c" | grep -q '試行2回'; then
-  ok 'send.sh 退行検査: 入力欄が空でも本文の断片が画面に残っていれば未送信と判定し、再送する（今回の本丸バグ）'
+  ok 'send.sh 退行検査: 入力欄の罫線の間に折り返された本文の続きが残っていれば未送信と判定し、Enter を送り直す'
 else
-  bad '送信済み誤判定の退行: 入力欄が空に見えるだけで、本文の断片が画面に残ったままなのに成功と誤判定している'
+  bad '送信済み誤判定の退行: 入力欄に本文の続きが残ったままなのに成功と誤判定している'
   printf '%s\n' "$out17c" | sed 's/^/      /'
+fi
+
+# 6y-3b) 本丸の退行検査（2026-10-05）: 送信に成功すると、Claude Code は会話欄に `❯ 本文` を残す。
+#     画面のどこかに `❯ 文字` や本文の断片があるだけで未送信と判定すると、成功しても毎回
+#     「残っている」になり、本文を貼り直して最後は失敗（終了コード 1）を返す。
+#     入力欄（罫線の間）が空なら 1 回で成功し、本文は 1 回しか置かないことを確かめる。
+SEND_LOG17="$g17/send-count.log"; : > "$SEND_LOG17"
+cat > "$g17/bin/cmux" <<CMUXSTUB
+#!/usr/bin/env bash
+case "\$1" in
+  send) printf 'send\n' >> "$SEND_LOG17"; exit 0 ;;
+  send-key) printf 'key\n' >> "$SEND_LOG17"; exit 0 ;;
+  read-screen)
+    n=\$(( \$(cat "\$COUNTER_FILE" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "\$n" > "\$COUNTER_FILE"
+    f="\$SCREEN_DIR/screen.\$n"
+    [ -f "\$f" ] || f="\$SCREEN_DIR/screen.last"
+    cat "\$f" 2>/dev/null
+    exit 0
+    ;;
+esac
+exit 0
+CMUXSTUB
+chmod +x "$g17/bin/cmux"
+scrsub="echo"; mkdir -p "$g17/screens/$scrsub"
+printf '──── w ─\n❯ \n────\n  status\n' > "$g17/screens/$scrsub/screen.1"
+printf '❯ 司令官より: PR を分けて出してください\n\n✻ Cooking… (2s · esc to interrupt)\n──── w ─\n❯ \n────\n  status\n' > "$g17/screens/$scrsub/screen.last"
+out17e=$(run17 "$scrsub" "司令官より: PR を分けて出してください"); rc17e=$?
+if [ "$rc17e" = "0" ] && printf '%s' "$out17e" | grep -q '試行1回' \
+   && [ "$(grep -c '^send$' "$SEND_LOG17")" = "1" ] \
+   && grep -q '司令官より: PR を分けて' "$g17/mission/workers/42/LAST_SEND"; then
+  ok 'send.sh: 会話欄に残る送信済みの `❯ 本文` を未送信と取り違えず 1 回で成功し、最後に送った本文を LAST_SEND に残す'
+else
+  bad 'send.sh の退行: 送信に成功したのに会話欄の `❯ 本文` を見て未送信と判定する（本文を貼り直して失敗を返す）'
+  printf '      rc=%s\n' "$rc17e"; printf '%s\n' "$out17e" | sed 's/^/      /'
+fi
+
+# 6y-3c) 入力欄に "[Pasted text ...]" が残り続けたら、本文は送り直さず Enter だけを送り直し、
+#     最後は失敗（終了コード 1）を返す（「送った」と報告させない）
+: > "$SEND_LOG17"
+scrsub="pasted"; mkdir -p "$g17/screens/$scrsub"
+printf '──── w ─\n❯ \n────\n  status\n' > "$g17/screens/$scrsub/screen.1"
+printf '──── w ─\n❯ [Pasted text #1 +40 lines]\n────\n  status\n' > "$g17/screens/$scrsub/screen.last"
+out17f=$(run17 "$scrsub" "長い指示の本文"); rc17f=$?
+if [ "$rc17f" = "1" ] && ! printf '%s' "$out17f" | grep -q '^OK ' \
+   && [ "$(grep -c '^send$' "$SEND_LOG17")" = "1" ] && [ "$(grep -c '^key$' "$SEND_LOG17")" = "4" ]; then
+  ok 'send.sh: 入力欄に [Pasted text] が残り続けたら本文は 1 回だけ置き Enter を 4 回送り直し、失敗を返す'
+else
+  bad 'send.sh の退行: 未送信のまま成功を返す、または再試行で本文を貼り直して 2 重にする'
+  printf '      rc=%s send=%s key=%s\n' "$rc17f" "$(grep -c '^send$' "$SEND_LOG17")" "$(grep -c '^key$' "$SEND_LOG17")"
+  printf '%s\n' "$out17f" | sed 's/^/      /'
 fi
 
 # 6y-4) 本丸の退行検査（今回の事故そのもの）: 画面が bash プロンプトだけ（Claude の UI が無い）
