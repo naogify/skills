@@ -147,13 +147,29 @@ if [ -s "$MISSION/completed.log" ]; then
   fi
 fi
 
-# ── 3. 稼働中の部下がいるのに watch.sh（見張り）が立っていなければ警告する ──
+# ── 3. 稼働中の部下がいるのに見張りが立っていなければ警告する ──
+# 見張りは watch-all.sh（全ミッションを 1 本で見る）。ミッションを指定せずに動いているもの、
+# またはこのミッションを指定して動いているものがあれば足りる。旧来の watch.sh も数える。
+watcher_running() {
+  local line rest
+  while IFS= read -r line; do
+    case "$line" in
+      *watch-all.sh*)
+        rest=${line#*watch-all.sh}
+        case "$rest" in *"$MISSION"*) return 0 ;; esac
+        # 引数がオプション（--follow / --interval N / --max N）だけ＝全ミッションを見ている
+        printf '%s\n' "$rest" | grep -qE '^([[:space:]]+(--follow|--interval[[:space:]]+[0-9]+|--max[[:space:]]+[0-9]+))*[[:space:]]*$' && return 0 ;;
+      *watch.sh*"$MISSION"*) return 0 ;;
+    esac
+  done < <(ps -axo command= 2>/dev/null)
+  return 1
+}
 if [ "$active_count" -gt 0 ]; then
-  if pgrep -f "watch[0-9]*\.sh.*${MISSION}" >/dev/null 2>&1; then
-    printf -- '--- 見張り: watch.sh が稼働中 ---\n'
+  if watcher_running; then
+    printf -- '--- 見張り: 稼働中 ---\n'
   else
-    printf -- '--- ⚠ 見張り不在: 稼働中の部下が %s 人いるのに watch.sh が見つからない ---\n' "$active_count"
-    printf '    bash %s/watch.sh "%s" をバックグラウンドで張り直すこと\n' "$HERE" "$MISSION"
+    printf -- '--- ⚠ 見張り不在: 稼働中の部下が %s 人いるのに watch-all.sh が見つからない ---\n' "$active_count"
+    printf '    Monitor（persistent）で bash %s/watch-all.sh --follow を張ること（SKILL.md「見張りは watch-all.sh だけ」）\n' "$HERE"
     pending=1
   fi
 fi
