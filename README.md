@@ -7,6 +7,9 @@ Claude Code の個人用スキルを配布するための marketplace。
 | スキル | 用途 |
 |---|---|
 | `commander` | cmux のワークスペースを部下として並列に立ち上げ、複数タスクを同時に走らせて指揮する |
+| `kid-explainer` | PR・issue・コード・仕組みを小学生でもわかるたとえで説明し、before/after を SVG で図解した HTML を Artifact に公開する |
+
+`skills/` 配下のスキルはすべて `commander` プラグインに同梱される（`issue-labeling` と同じく、呼ぶときは `/commander:kid-explainer`）。
 
 ## 導入
 
@@ -18,6 +21,7 @@ Claude Code の個人用スキルを配布するための marketplace。
 ## 使い方
 
 - `/commander:status` — 部下の状況と、人間の判断が必要なことを 3 枠（部下の状況 / 人間が決めること / 返事待ち）でまとめて報告させる。中身は全ミッションを横断する読み取り専用の `skills/commander/scripts/status.sh`
+- `/commander:kid-explainer` — 「小学生でもわかるように説明して、before/after を図解して、artifacts にまとめて」と頼むと発火する。骨組みは `skills/kid-explainer/templates/explainer.html`
 
 ## 更新を取り込む
 
