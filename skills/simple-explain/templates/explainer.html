@@ -1,0 +1,214 @@
+<title>〇〇はなぜ〇〇</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;800&family=Noto+Sans+JP:wght@400;700&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/*
+  simple-explain template.
+  Layout: one reading column. Each figure pairs a BEFORE panel and an AFTER panel side by side,
+  stacking on phones. Every color (including SVG paint) comes from the tokens below, so the page
+  works in light and dark. Replace every 〇〇 and every TODO comment, then delete unused parts.
+*/
+:root {
+  --bg: #f3f5f7;
+  --surface: #ffffff;
+  --ink: #1d2a33;
+  --muted: #5b6b77;
+  --line: #d0d9e0;
+  --before: #b8432f;
+  --before-soft: #fbe6e1;
+  --after: #1f7a58;
+  --after-soft: #def2e8;
+  --accent: #2f5fb3;
+  --accent-soft: #e3ebf8;
+  --hi: #e9ad3c;
+  --hi-soft: #fbefd6;
+  --font-display: "M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", "Noto Sans JP", sans-serif;
+  --font-body: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131a20; --surface: #1c252d; --ink: #e5ebf0; --muted: #9eadb8; --line: #34424d;
+    --before: #f08a76; --before-soft: #3a2420; --after: #6fd3a8; --after-soft: #183a2e;
+    --accent: #8cb1f0; --accent-soft: #1f2c43; --hi: #f0bd5a; --hi-soft: #3a2f18;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131a20; --surface: #1c252d; --ink: #e5ebf0; --muted: #9eadb8; --line: #34424d;
+  --before: #f08a76; --before-soft: #3a2420; --after: #6fd3a8; --after-soft: #183a2e;
+  --accent: #8cb1f0; --accent-soft: #1f2c43; --hi: #f0bd5a; --hi-soft: #3a2f18;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.8;
+}
+main { max-width: 960px; margin: 0 auto; padding-inline: 16px; padding-block: 32px 64px; display: grid; gap: 48px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 800; line-height: 1.35; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(1.75rem, 5.5vw, 2.6rem); }
+h2 { font-size: clamp(1.3rem, 3.8vw, 1.7rem); }
+h3 { font-size: 1.05rem; }
+p { margin: 0; }
+section, header { display: grid; gap: 16px; min-width: 0; }
+.read { max-width: 42em; }
+.eyebrow { font-family: var(--font-display); font-weight: 800; font-size: .85rem; letter-spacing: .08em; color: var(--accent); }
+.lead { font-size: 1.1rem; }
+.note { color: var(--muted); font-size: .9rem; }
+.guess { color: var(--muted); font-size: .85rem; font-weight: 700; }
+code { font-family: var(--font-mono); font-size: .86em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+a { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--hi); outline-offset: 2px; }
+
+/* ひとことで言うと（要点カード） */
+.summary { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.summary > div { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.summary b { font-family: var(--font-display); font-size: 1.05rem; }
+.summary p { font-size: .93rem; }
+
+/* before / after の図 */
+.figure { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 16px; display: grid; gap: 16px; min-width: 0; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 640px) { .pair { grid-template-columns: 1fr; } }
+.panel { display: grid; gap: 8px; align-content: start; min-width: 0; }
+.label { font-family: var(--font-display); font-weight: 800; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip { font-family: var(--font-body); font-size: .72rem; font-weight: 700; letter-spacing: .08em; padding: 2px 10px; border-radius: 999px; }
+.chip.b { background: var(--before-soft); color: var(--before); }
+.chip.a { background: var(--after-soft); color: var(--after); }
+.fig { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.fig svg { display: block; width: 100%; min-width: 280px; height: auto; }
+.panel p { font-size: .93rem; color: var(--muted); }
+.real { font-size: .85rem; color: var(--muted); border-top: 1px dashed var(--line); padding-top: 12px; }
+
+/* SVG の部品。色はすべてトークンから（直書き禁止） */
+svg text { font-family: var(--font-body); font-size: 13px; fill: var(--ink); }
+svg .t-s { font-size: 11px; fill: var(--muted); }
+svg .t-b { font-weight: 700; font-family: var(--font-display); }
+svg .t-big { font-size: 24px; font-weight: 800; font-family: var(--font-display); }
+svg .t-mono { font-family: var(--font-mono); font-size: 12px; }
+svg .t-before { fill: var(--before); font-weight: 700; }
+svg .t-after { fill: var(--after); font-weight: 700; }
+svg .t-on-hi { fill: #1d2a33; } /* --hi の上に乗せる文字。--hi は両テーマで明るいので固定色でよい */
+.s-bg { fill: var(--bg); }
+.s-surface { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.s-before { fill: var(--before-soft); stroke: var(--before); stroke-width: 1.5; }
+.s-after { fill: var(--after-soft); stroke: var(--after); stroke-width: 1.5; }
+.s-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.s-hi { fill: var(--hi); }
+.s-fill-accent { fill: var(--accent); }
+.s-arrow { stroke: var(--muted); stroke-width: 2; fill: none; }
+.s-arrow-before { stroke: var(--before); stroke-width: 2; fill: none; stroke-dasharray: 5 4; }
+.s-arrow-after { stroke: var(--after); stroke-width: 2; fill: none; }
+.s-head { fill: var(--muted); }
+.s-head-before { fill: var(--before); }
+.s-head-after { fill: var(--after); }
+
+/* 表（たとえ ↔ 本物の言葉） */
+.tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: .92rem; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { font-family: var(--font-display); background: var(--accent-soft); }
+tr:last-child td { border-bottom: 0; }
+
+/* 注意・根拠 */
+ul.plain { margin: 0; padding-left: 1.2em; display: grid; gap: 8px; }
+ul.plain li::marker { color: var(--muted); }
+.callout { background: var(--hi-soft); border-left: 5px solid var(--hi); border-radius: 0 12px 12px 0; padding: 14px 16px; }
+.src { font-family: var(--font-mono); font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }
+</style>
+
+<main>
+<header class="read">
+  <span class="eyebrow">〇〇（対象）／ 社内向け ／ YYYY-MM-DD 時点</span>
+  <h1>〇〇はなぜ〇〇</h1>
+  <p class="lead">TODO: 何の話か、答えは何かを 2〜3 文で。小学生でもわかる言葉で。</p>
+  <p class="note">TODO: たとえを 1 つだけ宣言する（例: 「〇〇を『お店』、〇〇を『受付番号』にたとえます」）。以降はこのたとえだけを使い回す。</p>
+</header>
+
+<section>
+  <h2>ひとことで言うと</h2>
+  <div class="summary">
+    <div><b>TODO: 要点 1</b><p>TODO: たとえの言葉で 1〜2 文。</p></div>
+    <div><b>TODO: 要点 2</b><p>TODO</p></div>
+    <div><b>TODO: 引き換え・注意</b><p>TODO</p></div>
+  </div>
+</section>
+
+<!-- 図はこの section を 2〜4 回くり返す -->
+<section>
+  <span class="eyebrow">図 1 ・ TODO: 場面の名前</span>
+  <h2>TODO: この図で言いたいこと</h2>
+  <div class="figure">
+    <div class="pair">
+      <div class="panel">
+        <div class="label"><span class="chip b">BEFORE</span>TODO: 困っていること</div>
+        <div class="fig">
+          <svg viewBox="0 40 320 150" role="img" aria-label="TODO: 図の中身を 1 文で">
+            <rect class="s-surface" x="16" y="60" width="110" height="64" rx="8"/>
+            <text x="71" y="88" text-anchor="middle" class="t-b">お客さん</text>
+            <text x="71" y="108" text-anchor="middle" class="t-s">TODO</text>
+            <path class="s-arrow-before" d="M126 92 H186"/><polygon class="s-head-before" points="186,87 196,92 186,97"/>
+            <rect class="s-before" x="198" y="60" width="110" height="64" rx="8"/>
+            <text x="253" y="88" text-anchor="middle" class="t-before">待たされる</text>
+            <text x="253" y="108" text-anchor="middle" class="t-s">TODO</text>
+            <text x="160" y="170" text-anchor="middle" class="t-s">TODO: 図の下の補足</text>
+          </svg>
+        </div>
+        <p>TODO: BEFORE で何が困るかを 1〜2 文。</p>
+      </div>
+      <div class="panel">
+        <div class="label"><span class="chip a">AFTER</span>TODO: どう解決したか</div>
+        <div class="fig">
+          <svg viewBox="0 40 320 150" role="img" aria-label="TODO: 図の中身を 1 文で">
+            <rect class="s-surface" x="16" y="60" width="110" height="64" rx="8"/>
+            <text x="71" y="88" text-anchor="middle" class="t-b">お客さん</text>
+            <rect class="s-hi" x="34" y="98" width="74" height="18" rx="3"/>
+            <text x="71" y="111" text-anchor="middle" class="t-s t-on-hi">番号札 #1</text>
+            <path class="s-arrow-after" d="M126 92 H186"/><polygon class="s-head-after" points="186,87 196,92 186,97"/>
+            <rect class="s-after" x="198" y="60" width="110" height="64" rx="8"/>
+            <text x="253" y="88" text-anchor="middle" class="t-after">すぐ戻れる</text>
+            <text x="253" y="108" text-anchor="middle" class="t-s">TODO</text>
+            <text x="160" y="170" text-anchor="middle" class="t-s">TODO: 図の下の補足</text>
+          </svg>
+        </div>
+        <p>TODO: AFTER で何が良くなったかを 1〜2 文。</p>
+      </div>
+    </div>
+    <p class="real">本物の話：TODO: たとえを外した本当の説明。数字・ファイル名・PR 番号はここに書く（<code>src/xxx.ts</code>）。</p>
+  </div>
+</section>
+
+<section>
+  <h2>たとえと本物の対応表</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>たとえ</th><th>本物の言葉</th><th>どこで確かめたか</th></tr></thead>
+      <tbody>
+        <tr><td>TODO: お店</td><td>TODO: サーバー（API）</td><td><code>TODO: path/to/file.ts</code></td></tr>
+        <tr><td>TODO: 受付番号</td><td>TODO: ジョブ ID</td><td><code>TODO</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>注意・まだ分からないこと</h2>
+  <ul class="plain read">
+    <li><b>TODO: 引き換えにしたもの。</b>TODO</li>
+    <li><b>TODO: 確かめていないこと。</b>TODO <span class="guess">（推測）</span></li>
+  </ul>
+  <p class="callout read">TODO: 読んだ人が次にやること・決めてほしいことがあれば 1〜2 文で。無ければこの段落を消す。</p>
+</section>
+
+<section>
+  <h2>確かめた根拠</h2>
+  <ul class="plain read">
+    <li>TODO: PR / issue：<a href="https://github.com/OWNER/REPO/pull/0">OWNER/REPO#0</a></li>
+    <li>TODO: 読んだファイル：<code>src/xxx.ts</code>（ブランチ・コミット）</li>
+    <li>TODO: 動かして確かめたこと（コマンド・環境）</li>
+  </ul>
+</section>
+</main>
