@@ -188,7 +188,7 @@ scan() {
     cooled "$m" "$no" "$kind" || continue
     case "$kind" in
       dead)   line="claude が動いていない（${sum}。absent=素のシェルに戻った / dialog=確認ダイアログ）" ;;
-      unsent) line="入力欄に未送信の指示が残っている（${sum}）。send.sh で Enter を送り直すか画面を確認する" ;;
+      unsent) line="入力欄に未送信の指示が残っている（${sum}）。send.sh <mission> <no> --enter で Enter だけ送り直すか画面を確認する" ;;
     esac
     printf 'watch-all: %s %s 部下%s %s: %s\n' "$kind" "$(basename "$m")" "$no" "$name" "$line"
     seen_put "$m" "$no" "$kind"

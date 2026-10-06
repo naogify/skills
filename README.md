@@ -38,3 +38,23 @@ Claude Code の個人用スキルを配布するための marketplace。
 - **private リポジトリ**です。社内固有の運用（リポジトリのブランチ規約、顧客名、org ruleset の挙動）が
   スキル本文に含まれるため、public にしないこと。
 - `commander` は `cmux`（https://cmux.com） が必要です。macOS 専用。
+
+## 許可ルール（commander の見張りが auto mode で止められないように）
+
+commander の見張り（`watch-all.sh`）や送信（`send.sh`）を auto mode の分類器に毎回判定させると、
+いつか拒否されて見張りが止まる（2026-10-05 に実際に起きた）。`~/.claude/settings.json` の
+`permissions.allow` に、インストール先のスクリプトを前方一致で許可するルールを入れておく:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash /Users/<user>/.claude/plugins/cache/naogify/commander/*)"
+    ]
+  }
+}
+```
+
+- `<user>` は自分のユーザー名に置き換える。バージョンごとにパスの途中（ハッシュ）が変わるので末尾は `*` にする
+- 前方一致なので、司令官は `bash $SKILL/...` のように変数のまま書かず、引用符でも囲まず、
+  展開した絶対パスで呼ぶ（`watch-all.sh` が出す `REARM:` 行はこの形になっている）

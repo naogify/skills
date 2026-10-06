@@ -151,6 +151,19 @@ else
   bad 'SKILL.md に見張り自作禁止 / 役割定義 / send.sh 使用の明記が無い（ADDENDUM の再発防止が抜けている）'
 fi
 
+# 6e-5) 2026-10-05 の再発防止: 見張りは watch-all.sh だけ・分類器に拒否されたら回避せず許可ルールを頼む・
+#       cmux send を直接使わず send.sh の成功を確かめてから「送った」と言う、が SKILL.md に明記されているか
+if LC_ALL=C grep -aq '見張りは `watch-all.sh` だけを使う。自作のループ・待機スクリプトを書かない' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '分類器に拒否されたら、自作のループや別の書き方で回避しない' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq 'permissions.allow' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '`cmux send` / `cmux send-key` を直接使わない' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq '「送った」と人間に報告する前に、`send.sh` が `OK` 行を出して終了コード 0 で終わったことを確かめる' "$D/../SKILL.md" 2>/dev/null \
+   && LC_ALL=C grep -aq 'commander/\*)' "$D/../../../README.md" 2>/dev/null; then
+  ok 'SKILL.md / README は watch-all.sh への一本化・分類器拒否時の許可ルール依頼・send.sh の成功確認を明記している'
+else
+  bad 'SKILL.md / README に watch-all.sh 一本化 / 許可ルールの頼み方 / send.sh の成功確認のどれかが無い（2026-10-05 の再発防止が抜けている）'
+fi
+
 # ── ここから下は実際に壊れたデータ・実際の git 履歴を食わせる退行検査。
 #    通ることの確認だけでは検品にならないので、失敗すべきケースも用意する。
 SANDBOX="$tmp/sandbox"; mkdir -p "$SANDBOX"
@@ -1841,6 +1854,24 @@ if grep -q '^watch-all: done m1 部下n ' "$g40/follow.out" \
 else
   bad 'watch-all.sh --follow の退行: 足した部下を拾わない、書き直しを拾わない、または終了してしまう'
   sed 's/^/      /' "$g40/follow.out" | head -8
+fi
+
+# 13d) sweep.sh は watch-all.sh を見張りとして数える（数えないと「見張り不在」と言われて
+#      watch.sh を張り直させられ、見張りが 2 系統に割れる）。ps を差し替えて決定的に見る
+g41="$SANDBOX/g41"; mkdir -p "$g41/bin" "$g41/m/workers/1" "$g41/other"
+jq -nc '{no:"1",name:"g41",ws_ref:"",ws_id:""}' > "$g41/m/roster.jsonl"
+printf '#!/usr/bin/env bash\ncat "$PS_OUT"\n' > "$g41/bin/ps"; chmod +x "$g41/bin/ps"
+sw41() { printf '%s\n' "$1" > "$g41/ps.out"; PS_OUT="$g41/ps.out" PATH="$g41/bin:$PATH" bash "$D/sweep.sh" "$g41/m" 2>&1; }
+o41a=$(sw41 'bash /x/scripts/watch-all.sh --follow --interval 30')
+o41b=$(sw41 "bash /x/scripts/watch-all.sh --interval 30 --max 3600 $g41/m")
+o41c=$(sw41 "bash /x/scripts/watch-all.sh --interval 30 $g41/other")
+o41d=$(sw41 'zsh')
+if printf '%s' "$o41a" | grep -q '見張り: 稼働中' && printf '%s' "$o41b" | grep -q '見張り: 稼働中' \
+   && printf '%s' "$o41c" | grep -q '見張り不在' && printf '%s' "$o41d" | grep -q 'watch-all.sh --follow を張る'; then
+  ok 'sweep.sh: 全ミッションを見る watch-all.sh と、このミッションを指定した watch-all.sh を見張りとして数え、別ミッションだけのものは数えない。不在なら watch-all.sh を勧める'
+else
+  bad 'sweep.sh の退行: watch-all.sh を見張りとして数えない、または別ミッション用を数える'
+  printf '%s\n' "$o41a" "$o41c" | grep '見張り' | sed 's/^/      /'
 fi
 
 if [ "$fail" = "0" ]; then printf '判定: 退行なし\n'; exit 0; else printf '判定: 退行あり（直すまでスキルを使わない）\n'; exit 1; fi
