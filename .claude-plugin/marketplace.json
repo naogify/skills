@@ -12,7 +12,7 @@
     {
       "name": "commander",
       "source": "./",
-      "description": "cmux のワークスペースを部下として並列に立ち上げ、複数タスクを同時に走らせて指揮する司令官モード。issue-labeling（issue のラベル判定）と kid-explainer（小学生向け before/after 図解）も同梱"
+      "description": "cmux のワークスペースを部下として並列に立ち上げ、複数タスクを同時に走らせて指揮する司令官モード。issue-labeling（issue のラベル判定）と simple-explain（小学生向け before/after 図解）も同梱"
     }
   ]
 }

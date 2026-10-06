@@ -1,9 +1,9 @@
 ---
-name: kid-explainer
-description: PR・issue・コード・仕組みを「小学生でもわかる」言葉と身近なたとえ 1 つで説明し、BEFORE（困っていること）と AFTER（どう解決したか）を SVG で横並びに図解した 1 枚の HTML を作って Artifact として公開する。「小学生でもわかるように説明して」「before/after で図解して」「図解して」「artifacts にまとめて」「たとえで説明して」「かみ砕いて図にして」のような依頼で使う。
+name: simple-explain
+description: PR・issue・コード・仕組みを「小学生でもわかる」言葉と身近なたとえ 1 つで説明し、BEFORE（困っていること）と AFTER（どう解決したか）を SVG で横並びに図解した 1 枚の HTML を作って Artifact として公開する。「小学生でもわかるように説明して」「before/after で図解して」「図解して」「artifacts にまとめて」「たとえで説明して」「かみ砕いて図にして」のような依頼で使う。小学生向けに限らず、大人向けのやさしい説明にも使える。
 ---
 
-# kid-explainer（小学生でもわかる before/after 図解）
+# simple-explain（小学生でもわかる before/after 図解）
 
 対象（PR・issue・コード・仕組み）を調べ、**身近なたとえ 1 つ**で説明し、**BEFORE / AFTER の図**を並べた
 1 枚の HTML を Artifact として公開して URL を返す。読み手は社内の人（エンジニアでない人を含む）。
